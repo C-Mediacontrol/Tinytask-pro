@@ -428,24 +428,24 @@ static LRESULT CALLBACK PromptDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     case WM_CREATE: {
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND hStatic = CreateWindowExA(0, "STATIC", g_PromptLabel,
-            WS_CHILD | WS_VISIBLE, 15, 12, 250, 20, hwnd, NULL, g_hInstance, NULL);
+            WS_CHILD | WS_VISIBLE, 15, 12, 300, 20, hwnd, NULL, g_hInstance, NULL);
         SendMessageA(hStatic, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         char numStr[32];
         wsprintfA(numStr, "%d", g_PromptDefault);
         g_hPromptEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", numStr,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
-            15, 36, 250, 22, hwnd, (HMENU)101, g_hInstance, NULL);
+            15, 36, 300, 22, hwnd, (HMENU)101, g_hInstance, NULL);
         SendMessageA(g_hPromptEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hBtnOk = CreateWindowExA(0, "BUTTON", "OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            65, 68, 70, 24, hwnd, (HMENU)IDOK, g_hInstance, NULL);
+            85, 68, 75, 24, hwnd, (HMENU)IDOK, g_hInstance, NULL);
         SendMessageA(hBtnOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hBtnCancel = CreateWindowExA(0, "BUTTON", "Cancel",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            150, 68, 70, 24, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+            175, 68, 75, 24, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
         SendMessageA(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         SetFocus(g_hPromptEdit);
@@ -505,8 +505,8 @@ static int PromptNumber(HWND hParent, const char* title, const char* label, int 
 
     RECT rcParent;
     GetWindowRect(hParent, &rcParent);
-    int posX = rcParent.left + (rcParent.right - rcParent.left - 290) / 2;
-    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 135) / 2;
+    int posX = rcParent.left + (rcParent.right - rcParent.left - 340) / 2;
+    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 145) / 2;
     if (posX < 0) posX = 100;
     if (posY < 0) posY = 100;
 
@@ -514,7 +514,7 @@ static int PromptNumber(HWND hParent, const char* title, const char* label, int 
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         "TTP_PromptDlg", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        posX, posY, 290, 135,
+        posX, posY, 340, 145,
         hParent, NULL, g_hInstance, NULL
     );
 
@@ -608,27 +608,27 @@ static LRESULT CALLBACK HotkeyDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     case WM_CREATE: {
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND hLbl = CreateWindowExA(0, "STATIC", "Press your desired key combination:",
-            WS_CHILD | WS_VISIBLE, 15, 12, 270, 18, hwnd, NULL, g_hInstance, NULL);
+            WS_CHILD | WS_VISIBLE, 15, 12, 320, 18, hwnd, NULL, g_hInstance, NULL);
         SendMessageA(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         g_hHotkeyStaticDisplay = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC",
             g_CapturedName[0] ? g_CapturedName : "[ Press any key... ]",
             WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
-            15, 34, 270, 28, hwnd, (HMENU)101, g_hInstance, NULL);
+            15, 34, 320, 28, hwnd, (HMENU)101, g_hInstance, NULL);
         SendMessageA(g_hHotkeyStaticDisplay, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hHint = CreateWindowExA(0, "STATIC", "Supports combinations like Ctrl + Alt + R, F8, etc.",
-            WS_CHILD | WS_VISIBLE | SS_CENTER, 15, 68, 270, 16, hwnd, NULL, g_hInstance, NULL);
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 15, 68, 320, 32, hwnd, NULL, g_hInstance, NULL);
         SendMessageA(hHint, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hBtnOk = CreateWindowExA(0, "BUTTON", "OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            75, 92, 70, 24, hwnd, (HMENU)IDOK, g_hInstance, NULL);
+            95, 106, 75, 26, hwnd, (HMENU)IDOK, g_hInstance, NULL);
         SendMessageA(hBtnOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hBtnCancel = CreateWindowExA(0, "BUTTON", "Cancel",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            160, 92, 70, 24, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+            185, 106, 75, 26, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
         SendMessageA(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         SetFocus(hwnd);
@@ -703,8 +703,8 @@ static BOOL CaptureHotkey(HWND hParent, const char* title, HotkeyState* pHk) {
 
     RECT rcParent;
     GetWindowRect(hParent, &rcParent);
-    int posX = rcParent.left + (rcParent.right - rcParent.left - 310) / 2;
-    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 160) / 2;
+    int posX = rcParent.left + (rcParent.right - rcParent.left - 360) / 2;
+    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 180) / 2;
     if (posX < 0) posX = 100;
     if (posY < 0) posY = 100;
 
@@ -712,7 +712,7 @@ static BOOL CaptureHotkey(HWND hParent, const char* title, HotkeyState* pHk) {
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         "TTP_HotkeyDlg", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        posX, posY, 310, 160,
+        posX, posY, 360, 180,
         hParent, NULL, g_hInstance, NULL
     );
 
