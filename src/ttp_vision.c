@@ -454,11 +454,54 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     for (int i = 0; i < N; i++) {
         nT[i] = (T[i] - meanT) / denomT;
     }
+
+    /* Compute 2x box-filtered template T2 for coarse search pyramid */
+    int TW2 = tw / 2;
+    int TH2 = th / 2;
+    int N2 = TW2 * TH2;
+    double* nT2 = NULL;
+    if (TW2 >= 4 && TH2 >= 4) {
+        double* T2 = (double*)malloc(N2 * sizeof(double));
+        if (T2) {
+            double sumT2 = 0.0;
+            for (int y2 = 0; y2 < TH2; y2++) {
+                for (int x2 = 0; x2 < TW2; x2++) {
+                    double v = 0.25 * (
+                        T[(2 * y2) * tw + (2 * x2)] +
+                        T[(2 * y2) * tw + (2 * x2 + 1)] +
+                        T[(2 * y2 + 1) * tw + (2 * x2)] +
+                        T[(2 * y2 + 1) * tw + (2 * x2 + 1)]
+                    );
+                    T2[y2 * TW2 + x2] = v;
+                    sumT2 += v;
+                }
+            }
+            double meanT2 = sumT2 / N2;
+            double sumSqDiffT2 = 0.0;
+            for (int i = 0; i < N2; i++) {
+                double d = T2[i] - meanT2;
+                sumSqDiffT2 += d * d;
+            }
+            double denomT2 = sqrt(sumSqDiffT2);
+            nT2 = (double*)malloc(N2 * sizeof(double));
+            if (nT2) {
+                if (denomT2 > 1e-6) {
+                    for (int i = 0; i < N2; i++) {
+                        nT2[i] = (T2[i] - meanT2) / denomT2;
+                    }
+                } else {
+                    memset(nT2, 0, N2 * sizeof(double));
+                }
+            }
+            free(T2);
+        }
+    }
     free(T);
 
     /* Capture screen DC into 32bpp top-down DIB */
     HDC hdcMem = CreateCompatibleDC(hdc);
     if (!hdcMem) {
+        if (nT2) free(nT2);
         free(nT);
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
@@ -478,6 +521,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pScreenBits, NULL, 0);
     if (!hBmp || !pScreenBits) {
         DeleteDC(hdcMem);
+        if (nT2) free(nT2);
         free(nT);
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
@@ -494,6 +538,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
         DeleteDC(hdcMem);
+        if (nT2) free(nT2);
         free(nT);
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
@@ -513,109 +558,136 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     DeleteDC(hdcMem);
     if (releaseDC) ReleaseDC(NULL, hdc);
 
-    /* Integral images for fast window sum and variance */
-    int satStride = screenW + 1;
-    int satSize = satStride * (screenH + 1);
-    double* sat1 = (double*)calloc(satSize, sizeof(double));
-    double* sat2 = (double*)calloc(satSize, sizeof(double));
-
-    if (!sat1 || !sat2) {
-        if (sat1) free(sat1);
-        if (sat2) free(sat2);
-        free(S);
-        free(nT);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-
-    for (int y = 0; y < screenH; y++) {
-        double rowSum1 = 0.0;
-        double rowSum2 = 0.0;
-        for (int x = 0; x < screenW; x++) {
-            double v = S[y * screenW + x];
-            rowSum1 += v;
-            rowSum2 += v * v;
-            sat1[(y + 1) * satStride + (x + 1)] = sat1[y * satStride + (x + 1)] + rowSum1;
-            sat2[(y + 1) * satStride + (x + 1)] = sat2[y * satStride + (x + 1)] + rowSum2;
-        }
-    }
-
-    int maxX = screenW - tw;
-    int maxY = screenH - th;
-    double bestScore = -1.0;
     int bestX = 0;
     int bestY = 0;
+    double bestScore = -1.0;
 
-    /* Power Automate Hierarchical Coarse-to-Fine Search:
-     * Pass 1: Coarse sampling with stride 4 in screen and stride 2 in template (<15ms)
-     */
-    const int STRIDE = 4;
-    for (int y = 0; y <= maxY; y += STRIDE) {
-        int y1 = y;
-        int y2 = y + th;
-        for (int x = 0; x <= maxX; x += STRIDE) {
-            int x1 = x;
-            int x2 = x + tw;
-
-            double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
-                        - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
-            double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
-                         - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
-
-            double varI = sumI2 - (sumI * sumI) / N;
-            if (varI <= 1e-4) continue;
-
-            double denomI = sqrt(varI);
-            double num = 0.0;
-            for (int v = 0; v < th; v += 2) {
-                const double* pS = &S[(y + v) * screenW + x];
-                const double* pnT = &nT[v * tw];
-                for (int u = 0; u < tw; u += 2) {
-                    num += pnT[u] * pS[u];
+    if (nT2 && screenW >= 16 && screenH >= 16) {
+        /* Pass 1: Coarse search on 2x box-filtered pyramid layer */
+        int W2 = screenW / 2;
+        int H2 = screenH / 2;
+        int N_S2 = W2 * H2;
+        double* S2 = (double*)malloc(N_S2 * sizeof(double));
+        if (S2) {
+            for (int y2 = 0; y2 < H2; y2++) {
+                const double* r0 = &S[(2 * y2) * screenW];
+                const double* r1 = &S[(2 * y2 + 1) * screenW];
+                double* dst = &S2[y2 * W2];
+                for (int x2 = 0; x2 < W2; x2++) {
+                    dst[x2] = 0.25 * (r0[2 * x2] + r0[2 * x2 + 1] + r1[2 * x2] + r1[2 * x2 + 1]);
                 }
             }
-            double score = (num * 4.0) / denomI;
-            if (score > bestScore) {
-                bestScore = score;
-                bestX = x;
-                bestY = y;
+
+            int satStride2 = W2 + 1;
+            int satSize2 = satStride2 * (H2 + 1);
+            double* sat1_2 = (double*)calloc(satSize2, sizeof(double));
+            double* sat2_2 = (double*)calloc(satSize2, sizeof(double));
+            if (sat1_2 && sat2_2) {
+                for (int y = 0; y < H2; y++) {
+                    double rowSum1 = 0.0, rowSum2 = 0.0;
+                    const double* row = &S2[y * W2];
+                    for (int x = 0; x < W2; x++) {
+                        double v = row[x];
+                        rowSum1 += v;
+                        rowSum2 += v * v;
+                        sat1_2[(y + 1) * satStride2 + (x + 1)] = sat1_2[y * satStride2 + (x + 1)] + rowSum1;
+                        sat2_2[(y + 1) * satStride2 + (x + 1)] = sat2_2[y * satStride2 + (x + 1)] + rowSum2;
+                    }
+                }
+
+                int maxX2 = W2 - TW2;
+                int maxY2 = H2 - TH2;
+                double bestCoarseScore = -1.0;
+                int bestCoarseX = 0, bestCoarseY = 0;
+
+                for (int y2 = 0; y2 <= maxY2; y2++) {
+                    int y1_idx = y2 * satStride2;
+                    int y2_idx = (y2 + TH2) * satStride2;
+                    for (int x2 = 0; x2 <= maxX2; x2++) {
+                        double sumI = sat1_2[y2_idx + (x2 + TW2)] - sat1_2[y1_idx + (x2 + TW2)]
+                                    - sat1_2[y2_idx + x2] + sat1_2[y1_idx + x2];
+                        double sumI2 = sat2_2[y2_idx + (x2 + TW2)] - sat2_2[y1_idx + (x2 + TW2)]
+                                     - sat2_2[y2_idx + x2] + sat2_2[y1_idx + x2];
+
+                        double varI = sumI2 - (sumI * sumI) / N2;
+                        if (varI <= 25.0) continue;
+
+                        double denomI = sqrt(varI);
+                        double num = 0.0;
+                        for (int v = 0; v < TH2; v++) {
+                            const double* pS2 = &S2[(y2 + v) * W2 + x2];
+                            const double* pnT2 = &nT2[v * TW2];
+                            for (int u = 0; u < TW2; u++) {
+                                num += pnT2[u] * pS2[u];
+                            }
+                        }
+                        double score = num / denomI;
+                        if (score > bestCoarseScore) {
+                            bestCoarseScore = score;
+                            bestCoarseX = x2;
+                            bestCoarseY = y2;
+                        }
+                    }
+                }
+
+                /* Pass 2: Fine polish in +-8 px window around coarse peak in full resolution */
+                int cX = bestCoarseX * 2;
+                int cY = bestCoarseY * 2;
+                int fineX0 = max(0, cX - 8);
+                int fineX1 = min(screenW - tw, cX + 8);
+                int fineY0 = max(0, cY - 8);
+                int fineY1 = min(screenH - th, cY + 8);
+
+                for (int y = fineY0; y <= fineY1; y++) {
+                    for (int x = fineX0; x <= fineX1; x++) {
+                        double sumI = 0.0, sumI2 = 0.0, num = 0.0;
+                        for (int v = 0; v < th; v++) {
+                            const double* pS = &S[(y + v) * screenW + x];
+                            const double* pnT = &nT[v * tw];
+                            for (int u = 0; u < tw; u++) {
+                                double val = pS[u];
+                                sumI += val;
+                                sumI2 += val * val;
+                                num += pnT[u] * val;
+                            }
+                        }
+                        double varI = sumI2 - (sumI * sumI) / N;
+                        if (varI <= 25.0) continue;
+                        double score = num / sqrt(varI);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestX = x;
+                            bestY = y;
+                        }
+                    }
+                }
+
+                free(sat1_2);
+                free(sat2_2);
             }
+            free(S2);
         }
-    }
-
-    /* Pass 2: Fine full-resolution polish in +-STRIDE around coarse peak (<2ms) */
-    if (bestScore > 0.45) {
-        int fineX0 = max(0, bestX - STRIDE);
-        int fineX1 = min(maxX, bestX + STRIDE);
-        int fineY0 = max(0, bestY - STRIDE);
-        int fineY1 = min(maxY, bestY + STRIDE);
-
-        for (int y = fineY0; y <= fineY1; y++) {
-            int y1 = y;
-            int y2 = y + th;
-            for (int x = fineX0; x <= fineX1; x++) {
-                int x1 = x;
-                int x2 = x + tw;
-
-                double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
-                            - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
-                double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
-                             - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
-
-                double varI = sumI2 - (sumI * sumI) / N;
-                if (varI <= 1e-4) continue;
-
-                double denomI = sqrt(varI);
-                double num = 0.0;
+        free(nT2);
+    } else {
+        /* Fallback for very small templates (<8x8) */
+        int maxX = screenW - tw;
+        int maxY = screenH - th;
+        for (int y = 0; y <= maxY; y += 2) {
+            for (int x = 0; x <= maxX; x += 2) {
+                double sumI = 0.0, sumI2 = 0.0, num = 0.0;
                 for (int v = 0; v < th; v++) {
                     const double* pS = &S[(y + v) * screenW + x];
                     const double* pnT = &nT[v * tw];
                     for (int u = 0; u < tw; u++) {
-                        num += pnT[u] * pS[u];
+                        double val = pS[u];
+                        sumI += val;
+                        sumI2 += val * val;
+                        num += pnT[u] * val;
                     }
                 }
-
-                double score = num / denomI;
+                double varI = sumI2 - (sumI * sumI) / N;
+                if (varI <= 25.0) continue;
+                double score = num / sqrt(varI);
                 if (score > bestScore) {
                     bestScore = score;
                     bestX = x;
@@ -625,8 +697,6 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         }
     }
 
-    free(sat1);
-    free(sat2);
     free(S);
     free(nT);
 

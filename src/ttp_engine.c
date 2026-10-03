@@ -500,6 +500,12 @@ void ttp_engine_set_timeout_callback(TTPTimeoutCallback cb, void* userData) {
     g_timeoutUserData = userData;
 }
 
+static HDC s_hdcScreenOverride = NULL;
+
+void ttp_engine_set_screen_dc_override(HDC hdcOverride) {
+    s_hdcScreenOverride = hdcOverride;
+}
+
 static int handle_timeout_choice(const TTPStep* step, HWND hParent) {
     if (g_timeoutCallback) {
         return g_timeoutCallback(step, g_timeoutUserData);
@@ -554,6 +560,24 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 }
             }
 
+            /* Dual-Engine Fallback: If accessible text was not found, attempt visual NCC match using bmpData */
+            if (!targetFound && bmpData && bmpSize > 0) {
+                HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                POINT matchPos = { step->origX, step->origY };
+                double score = 0.0;
+                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
+
+                if (matched) {
+                    targetX = matchPos.x;
+                    targetY = matchPos.y;
+                    targetFound = TRUE;
+                    break;
+                }
+            }
+
             if (GetTickCount() - startTick >= timeout) {
                 int choice = handle_timeout_choice(step, hParentForModal);
                 if (choice == TTP_TIMEOUT_RETRY) {
@@ -579,13 +603,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
         while (!targetFound) {
             if (bmpData && bmpSize > 0) {
-                HDC hdcScreen = GetDC(NULL);
+                HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
                 int screenW = GetSystemMetrics(SM_CXSCREEN);
                 int screenH = GetSystemMetrics(SM_CYSCREEN);
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.80, &matchPos, &score);
-                ReleaseDC(NULL, hdcScreen);
+                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
 
                 if (matched) {
                     targetX = matchPos.x;

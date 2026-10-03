@@ -89,24 +89,37 @@ static void test_step_array_lifecycle(void) {
 static void test_timeout_formatting(void) {
     printf("[TEST 2/6] Running test_timeout_formatting...\n");
 
-    DWORD ms1 = ParseTimeoutString("5.0");
+    DWORD ms1 = 0; int act1 = 0;
+    ParseTimeoutString("5.0", &ms1, &act1);
     assert(ms1 == 5000);
 
-    DWORD ms2 = ParseTimeoutString("0.5s");
+    DWORD ms2 = 0; int act2 = 0;
+    ParseTimeoutString("0.5s", &ms2, &act2);
     assert(ms2 == 500);
 
-    DWORD ms3 = ParseTimeoutString("10");
+    DWORD ms3 = 0; int act3 = 0;
+    ParseTimeoutString("10", &ms3, &act3);
     assert(ms3 == 10000);
 
-    DWORD ms4 = ParseTimeoutString("0.05"); /* Clamped to 100ms min */
+    DWORD ms4 = 0; int act4 = 0;
+    ParseTimeoutString("0.05", &ms4, &act4); /* Clamped to 100ms min */
     assert(ms4 >= 100);
 
-    char outStr[32];
-    FormatTimeoutString(3000, outStr, sizeof(outStr));
-    assert(strcmp(outStr, "3.0s") == 0);
+    TTPStep step1;
+    memset(&step1, 0, sizeof(step1));
+    step1.timeoutMs = 3000;
+    step1.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_DEFAULT);
+    char outStr[64];
+    FormatTimeoutString(&step1, outStr, sizeof(outStr));
+    assert(strstr(outStr, "3.0s") != NULL);
 
-    FormatTimeoutString(750, outStr, sizeof(outStr));
-    assert(strcmp(outStr, "0.8s") == 0 || strcmp(outStr, "0.7s") == 0 || strcmp(outStr, "0.75s") == 0);
+    TTPStep step2;
+    memset(&step2, 0, sizeof(step2));
+    step2.timeoutMs = 750;
+    step2.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_RETRY);
+    FormatTimeoutString(&step2, outStr, sizeof(outStr));
+    assert(strstr(outStr, "0.8s") != NULL || strstr(outStr, "0.7s") != NULL);
+    assert(strstr(outStr, "[Retry]") != NULL);
 
     printf("      => PASSED (Timeout parse and format verified)\n");
 }

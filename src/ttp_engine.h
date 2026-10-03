@@ -42,6 +42,7 @@ DWORD ttp_synth_finalize(TTPStep* outSteps, DWORD maxSteps);
 typedef int (*TTPTimeoutCallback)(const TTPStep* step, void* userData);
 
 void ttp_engine_set_timeout_callback(TTPTimeoutCallback cb, void* userData);
+void ttp_engine_set_screen_dc_override(HDC hdcOverride);
 BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, HWND hParentForModal);
 
 /* Default native Win32 modal dialog for timeout prompt */

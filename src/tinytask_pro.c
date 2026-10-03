@@ -193,6 +193,17 @@ static void LoadConfig(void);
 static void SaveConfig(void);
 static void ShowOptionsMenu(HWND hwnd, int x, int y);
 
+static BOOL IsSystemInDarkMode(void) {
+    HKEY hKey;
+    DWORD val = 1;
+    DWORD sz = sizeof(val);
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        RegQueryValueExA(hKey, "AppsUseLightTheme", NULL, NULL, (LPBYTE)&val, &sz);
+        RegCloseKey(hKey);
+    }
+    return (val == 0);
+}
+
 /* =========================================================================
  * 1. Step Array Management
  * ========================================================================= */
@@ -1402,7 +1413,7 @@ static void ShowOptionsMenu(HWND hwnd, int x, int y) {
     HMENU hPlayHot = CreatePopupMenu();
 
     /* Speed options */
-    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_HALF ? MF_CHECKED : 0), ID_OPT_SPEED_HALF, "Play Speed:   \xbd");
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_HALF ? MF_CHECKED : 0), ID_OPT_SPEED_HALF, "Play Speed:   1/2x");
     AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_1X ? MF_CHECKED : 0), ID_OPT_SPEED_1X, "Play Speed:   &1x");
     AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_2X ? MF_CHECKED : 0), ID_OPT_SPEED_2X, "Play Speed:   &2x");
     AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_100X ? MF_CHECKED : 0), ID_OPT_SPEED_100X, "Play Speed:   100x");
@@ -1448,7 +1459,7 @@ static void ShowOptionsMenu(HWND hwnd, int x, int y) {
     AppendMenuA(hPlayHot, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hPlayHot, MF_STRING, ID_PLAY_HOTKEY_CUSTOM_SET, "&Set Custom Hotkey...");
     AppendMenuA(hPlayHot, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hPlayHot, MF_STRING | MF_GRAYED, 0, "\x95 Hint:  Press {PAUSE} or {ScrollLock} to stop playbacks");
+    AppendMenuA(hPlayHot, MF_STRING | MF_GRAYED, 0, "* Hint:  Press {PAUSE} or {ScrollLock} to stop playbacks");
     AppendMenuA(hMenu, MF_POPUP, (UINT_PTR)hPlayHot, "Playback Hot&key");
 
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
@@ -1467,7 +1478,9 @@ static void ShowOptionsMenu(HWND hwnd, int x, int y) {
     AppendMenuA(hMenu, MF_STRING, ID_OPT_WEBSITE, "TinyTask &Website");
     AppendMenuA(hMenu, MF_STRING, ID_OPT_ABOUT, "&About TinyTask Pro...");
 
+    SetForegroundWindow(hwnd);
     TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, x, y, 0, hwnd, NULL);
+    PostMessageA(hwnd, WM_NULL, 0, 0);
     DestroyMenu(hMenu);
 }
 
@@ -1507,19 +1520,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             10, 322, 55, 26, hwnd, (HMENU)ID_BTN_ADD_STEP, g_hInstance, NULL);
         SendMessageA(g_hBtnAdd, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        g_hBtnDel = CreateWindowExA(0, "BUTTON", "[\xc3\x97 Del]", WS_CHILD | BS_PUSHBUTTON,
+        g_hBtnDel = CreateWindowExA(0, "BUTTON", "[- Del]", WS_CHILD | BS_PUSHBUTTON,
             70, 322, 55, 26, hwnd, (HMENU)ID_BTN_DEL_STEP, g_hInstance, NULL);
         SendMessageA(g_hBtnDel, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        g_hBtnUp = CreateWindowExA(0, "BUTTON", "[\xe2\x96\xb2 Up]", WS_CHILD | BS_PUSHBUTTON,
+        g_hBtnUp = CreateWindowExA(0, "BUTTON", "[Up]", WS_CHILD | BS_PUSHBUTTON,
             130, 322, 52, 26, hwnd, (HMENU)ID_BTN_MOVE_UP, g_hInstance, NULL);
         SendMessageA(g_hBtnUp, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        g_hBtnDown = CreateWindowExA(0, "BUTTON", "[\xe2\x96\xbc Dn]", WS_CHILD | BS_PUSHBUTTON,
+        g_hBtnDown = CreateWindowExA(0, "BUTTON", "[Down]", WS_CHILD | BS_PUSHBUTTON,
             187, 322, 52, 26, hwnd, (HMENU)ID_BTN_MOVE_DOWN, g_hInstance, NULL);
         SendMessageA(g_hBtnDown, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        g_hBtnRun = CreateWindowExA(0, "BUTTON", "[Step Run \xe2\x96\xb6]", WS_CHILD | BS_PUSHBUTTON,
+        g_hBtnRun = CreateWindowExA(0, "BUTTON", "[Run Step]", WS_CHILD | BS_PUSHBUTTON,
             244, 322, 126, 26, hwnd, (HMENU)ID_BTN_STEP_RUN, g_hInstance, NULL);
         SendMessageA(g_hBtnRun, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
@@ -1596,12 +1609,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             for (int i = 0; i < NUM_BUTTONS; i++) {
                 int bx = TOOLBAR_PADDING + i * (BUTTON_WIDTH + TOOLBAR_PADDING);
                 if (x >= bx && x < bx + BUTTON_WIDTH) {
-                    SendMessageA(hwnd, WM_COMMAND, ID_PRO_OPEN + i, 0);
+                    PostMessageA(hwnd, WM_COMMAND, ID_PRO_OPEN + i, 0);
                     break;
                 }
             }
         }
         return 0;
+    }
+
+    case WM_INITMENUPOPUP: {
+        HWND hMenuWnd = FindWindowA("#32768", NULL);
+        if (hMenuWnd) {
+            InvalidateRect(hMenuWnd, NULL, TRUE);
+            UpdateWindow(hMenuWnd);
+        }
+        break;
     }
 
     case WM_NOTIFY: {
@@ -2009,7 +2031,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
     RECT rc = { 0, 0, CLIENT_COLLAPSED_W, effectiveH + 2 * TOOLBAR_PADDING };
-    AdjustWindowRectEx(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    AdjustWindowRectEx(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, FALSE, 0);
 
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
@@ -2019,7 +2041,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     HWND hwnd = CreateWindowExA(
         g_AlwaysOnTop ? WS_EX_TOPMOST : 0,
         "TinyTaskProClass", "TinyTask Pro",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         x, y, w, h,
         NULL, NULL, hInstance, NULL
     );
