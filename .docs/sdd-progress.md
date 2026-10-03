@@ -10,5 +10,5 @@
 - [x] Task 2: Pure-C Adaptive Vision & Spatial Disambiguation Engine (commit fcdf8f8, verified all 4 test suites pass)
 - [x] Task 3: Semantic Action Synthesizer & Recording Engine (commit 003cd75, verified all 8 test cases pass)
 - [x] Task 4: Collapsible Drawer UI, Step ListView & TinyTask Pro Shell (commit f902c55, 68KB binary built)
-- [ ] Task 5: End-to-End Build, Size Budget Gate (<800KB check), and Verification
+- [x] Task 5: End-to-End Build, Size Budget Gate (<800KB check), and Verification (commit 68KB confirmed, all tests passed)
 
