@@ -30,13 +30,49 @@
 #define ID_BTN_STEP_RUN  0x9105
 #define ID_EDIT_TIMEOUT  0x9106
 
-/* Options menu IDs */
-#define ID_OPT_SPEED_HALF 0x9200
-#define ID_OPT_SPEED_1X   0x9201
-#define ID_OPT_SPEED_2X   0x9202
-#define ID_OPT_CONT       0x9203
-#define ID_OPT_TOPMOST    0x9204
-#define ID_OPT_ABOUT      0x9205
+/* Options menu IDs: Speed modes */
+#define ID_OPT_SPEED_HALF    0x9200
+#define ID_OPT_SPEED_1X      0x9201
+#define ID_OPT_SPEED_2X      0x9202
+#define ID_OPT_SPEED_100X    0x9203
+#define ID_OPT_SPEED_CUSTOM  0x9204
+#define ID_OPT_SET_SPEED     0x9205
+
+/* Options menu IDs: Playback loops */
+#define ID_OPT_CONT          0x9206
+#define ID_OPT_SET_LOOPS     0x9207
+
+/* Options menu IDs: Recording Hotkeys */
+#define ID_REC_HOTKEY_STD    0x9210 /* Ctrl+Shift+Alt+R */
+#define ID_REC_HOTKEY_PRTSC  0x9211 /* PrintScreen */
+#define ID_REC_HOTKEY_F8     0x9212 /* F8 */
+#define ID_REC_HOTKEY_F12    0x9213 /* F12 */
+#define ID_REC_HOTKEY_CUSTOM_ACTIVE 0x9214
+#define ID_REC_HOTKEY_CUSTOM_SET    0x9215
+
+/* Options menu IDs: Playback Hotkeys */
+#define ID_PLAY_HOTKEY_STD   0x9220 /* Ctrl+Shift+Alt+P */
+#define ID_PLAY_HOTKEY_PRTSC 0x9221 /* PrintScreen */
+#define ID_PLAY_HOTKEY_F8    0x9222 /* F8 */
+#define ID_PLAY_HOTKEY_F12   0x9223 /* F12 */
+#define ID_PLAY_HOTKEY_CUSTOM_ACTIVE 0x9224
+#define ID_PLAY_HOTKEY_CUSTOM_SET    0x9225
+
+/* Options menu IDs: Views, Themes & Pro Settings */
+#define ID_OPT_TOPMOST          0x9230
+#define ID_OPT_SHOW_CAPTIONS    0x9231
+#define ID_OPT_TOOLBAR_CUSTOM   0x9232
+#define ID_OPT_TOOLBAR_DEFAULT  0x9233
+#define ID_OPT_DEFAULT_TIMEOUT  0x9234
+#define ID_OPT_WEBSITE          0x9235
+#define ID_OPT_ABOUT            0x9236
+
+/* Speed mode constants matching TinyTask engine */
+#define SPEED_HALF   0
+#define SPEED_1X     1
+#define SPEED_2X     2
+#define SPEED_100X   100
+#define SPEED_CUSTOM 999
 
 /* Custom Messages */
 #define WM_USER_PLAY_UPDATE (WM_USER + 10)
@@ -61,6 +97,15 @@
 #define TIMER_REC    1001
 #define TIMER_HOTKEY 1005
 
+/* Hotkey structure matching classic TinyTask */
+typedef struct {
+    int  mode;           /* 0=Standard, 1=PrtSc, 8=F8, 12=F12, 99=Custom */
+    BOOL customSet;
+    UINT customVk;
+    UINT customMod;     /* MOD_CONTROL, MOD_ALT, MOD_SHIFT */
+    char customName[64];
+} HotkeyState;
+
 /* Globals */
 static HINSTANCE g_hInstance = NULL;
 static HWND g_hMainWnd = NULL;
@@ -78,16 +123,30 @@ static HFONT g_hGuiFont = NULL;
 /* Toolbar Resources */
 static HBITMAP g_hBmpToolbar = NULL;
 static HBITMAP g_hBmpMask = NULL;
+static BOOL    g_HasCustomToolbar = FALSE;
+static char    g_CustomToolbarPath[MAX_PATH] = "";
+static int     g_HideCaptionsOffset = 0; /* 0 = show captions (44px), 12 = hide captions (32px) */
+
+/* Window Positioning */
+static int  g_WindowX = -9999;
+static int  g_WindowY = -9999;
 
 /* Application State */
 static int  g_State = STATE_IDLE;
 static BOOL g_DrawerExpanded = FALSE;
 static BOOL g_AlwaysOnTop = FALSE;
 static BOOL g_Continuous = FALSE;
-static int  g_SpeedMode = 1; /* 0 = 0.5x, 1 = 1x, 2 = 2x */
+static int  g_SpeedMode = SPEED_1X;
+static int  g_CustomSpeed = 5;
+static DWORD g_PlayLoopTotal = 1;
+static DWORD g_DefaultTimeoutSec = 3;
 static char g_CurrentFileName[MAX_PATH] = "";
 static DWORD g_RecStartTime = 0;
 static DWORD g_PlayStartTime = 0;
+
+/* Hotkey configurations */
+static HotkeyState g_RecHotkey = { 0, FALSE, 0, 0, "" };
+static HotkeyState g_PlayHotkey = { 0, FALSE, 0, 0, "" };
 
 /* Dynamic Step Storage */
 static TTPStep* g_steps = NULL;
@@ -129,6 +188,10 @@ static void StartPlayback(void);
 static void StopPlayback(void);
 static void StartRecording(void);
 static void StopRecording(void);
+static void CreateToolbarBitmaps(void);
+static void LoadConfig(void);
+static void SaveConfig(void);
+static void ShowOptionsMenu(HWND hwnd, int x, int y);
 
 /* =========================================================================
  * 1. Step Array Management
@@ -184,264 +247,650 @@ static BOOL StepArray_EnsureCap(DWORD needed) {
 
 static BOOL StepArray_Add(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize) {
     if (!StepArray_EnsureCap(g_stepCount + 1)) return FALSE;
-    DWORD idx = g_stepCount;
-    memcpy(&g_steps[idx], step, sizeof(TTPStep));
-    g_steps[idx].stepId = idx + 1;
+    g_steps[g_stepCount] = *step;
+    g_steps[g_stepCount].stepId = g_stepCount + 1;
 
     if (bmpData && bmpSize > 0) {
-        g_bmpBuffers[idx] = (BYTE*)malloc(bmpSize);
-        if (g_bmpBuffers[idx]) {
-            memcpy(g_bmpBuffers[idx], bmpData, bmpSize);
-            g_bmpSizes[idx] = bmpSize;
-            g_steps[idx].imageSize = bmpSize;
+        g_bmpBuffers[g_stepCount] = (BYTE*)malloc(bmpSize);
+        if (g_bmpBuffers[g_stepCount]) {
+            memcpy(g_bmpBuffers[g_stepCount], bmpData, bmpSize);
+            g_bmpSizes[g_stepCount] = bmpSize;
         } else {
-            g_bmpBuffers[idx] = NULL;
-            g_bmpSizes[idx] = 0;
-            g_steps[idx].imageSize = 0;
+            g_bmpSizes[g_stepCount] = 0;
         }
     } else {
-        g_bmpBuffers[idx] = NULL;
-        g_bmpSizes[idx] = 0;
-        g_steps[idx].imageSize = 0;
+        g_bmpBuffers[g_stepCount] = NULL;
+        g_bmpSizes[g_stepCount] = 0;
     }
+
     g_stepCount++;
     return TRUE;
 }
 
-static BOOL StepArray_MoveUp(DWORD index) {
-    if (index == 0 || index >= g_stepCount) return FALSE;
-    DWORD prev = index - 1;
-
-    TTPStep tempStep = g_steps[index];
-    BYTE* tempBmp = g_bmpBuffers[index];
-    DWORD tempSz = g_bmpSizes[index];
-
-    g_steps[index] = g_steps[prev];
-    g_bmpBuffers[index] = g_bmpBuffers[prev];
-    g_bmpSizes[index] = g_bmpSizes[prev];
-
-    g_steps[prev] = tempStep;
-    g_bmpBuffers[prev] = tempBmp;
-    g_bmpSizes[prev] = tempSz;
-
-    g_steps[prev].stepId = prev + 1;
-    g_steps[index].stepId = index + 1;
-    return TRUE;
-}
-
-static BOOL StepArray_MoveDown(DWORD index) {
-    if (index + 1 >= g_stepCount) return FALSE;
-    DWORD next = index + 1;
-
-    TTPStep tempStep = g_steps[index];
-    BYTE* tempBmp = g_bmpBuffers[index];
-    DWORD tempSz = g_bmpSizes[index];
-
-    g_steps[index] = g_steps[next];
-    g_bmpBuffers[index] = g_bmpBuffers[next];
-    g_bmpSizes[index] = g_bmpSizes[next];
-
-    g_steps[next] = tempStep;
-    g_bmpBuffers[next] = tempBmp;
-    g_bmpSizes[next] = tempSz;
-
-    g_steps[index].stepId = index + 1;
-    g_steps[next].stepId = next + 1;
-    return TRUE;
+static void StepArray_Renumber(void) {
+    for (DWORD i = 0; i < g_stepCount; i++) {
+        g_steps[i].stepId = i + 1;
+    }
 }
 
 static BOOL StepArray_Delete(DWORD index) {
     if (index >= g_stepCount) return FALSE;
     if (g_bmpBuffers[index]) {
         free(g_bmpBuffers[index]);
-        g_bmpBuffers[index] = NULL;
     }
     for (DWORD i = index; i + 1 < g_stepCount; i++) {
         g_steps[i] = g_steps[i + 1];
         g_bmpBuffers[i] = g_bmpBuffers[i + 1];
         g_bmpSizes[i] = g_bmpSizes[i + 1];
-        g_steps[i].stepId = i + 1;
     }
+    g_bmpBuffers[g_stepCount - 1] = NULL;
+    g_bmpSizes[g_stepCount - 1] = 0;
     g_stepCount--;
-    if (g_stepCount < g_stepCap) {
-        g_bmpBuffers[g_stepCount] = NULL;
-        g_bmpSizes[g_stepCount] = 0;
-    }
+    StepArray_Renumber();
     return TRUE;
 }
 
+static BOOL StepArray_MoveUp(DWORD index) {
+    if (index == 0 || index >= g_stepCount) return FALSE;
+    TTPStep tmpStep = g_steps[index - 1];
+    BYTE* tmpBmp = g_bmpBuffers[index - 1];
+    DWORD tmpSize = g_bmpSizes[index - 1];
+
+    g_steps[index - 1] = g_steps[index];
+    g_bmpBuffers[index - 1] = g_bmpBuffers[index];
+    g_bmpSizes[index - 1] = g_bmpSizes[index];
+
+    g_steps[index] = tmpStep;
+    g_bmpBuffers[index] = tmpBmp;
+    g_bmpSizes[index] = tmpSize;
+
+    StepArray_Renumber();
+    return TRUE;
+}
+
+static BOOL StepArray_MoveDown(DWORD index) {
+    if (index + 1 >= g_stepCount) return FALSE;
+    return StepArray_MoveUp(index + 1);
+}
+
 /* =========================================================================
- * 2. Formatting & Parsing Helpers
+ * 2. Recorded Clicks Buffer
  * ========================================================================= */
 
-static DWORD ParseTimeoutString(const char* str) {
-    if (!str || !*str) return 3000;
-    while (*str == ' ' || *str == '\t') str++;
-    double val = atof(str);
-    if (val <= 0.0) return 3000;
-    /* User enters seconds (e.g. 5.0 -> 5000ms), min 0.1s (100ms), max 3600s */
-    if (val < 0.1) val = 0.1;
-    if (val > 3600.0) val = 3600.0;
-    return (DWORD)(val * 1000.0 + 0.5);
+static void ClearRecordedClicks(void) {
+    if (g_recClicks) {
+        for (DWORD i = 0; i < g_recClickCount; i++) {
+            if (g_recClicks[i].bmpData) {
+                free(g_recClicks[i].bmpData);
+            }
+        }
+        free(g_recClicks);
+        g_recClicks = NULL;
+    }
+    g_recClickCount = 0;
+    g_recClickCap = 0;
 }
 
-static void FormatTimeoutString(DWORD ms, char* out, int maxLen) {
-    double sec = (double)ms / 1000.0;
-    snprintf(out, maxLen, "%.1fs", sec);
+static void AddRecordedClick(LONG x, LONG y, DWORD timestamp, BYTE* bmpData, DWORD bmpSize, const char* text) {
+    if (g_recClickCount >= g_recClickCap) {
+        DWORD newCap = (g_recClickCap == 0) ? 16 : g_recClickCap * 2;
+        RecordedClick* newArr = (RecordedClick*)realloc(g_recClicks, newCap * sizeof(RecordedClick));
+        if (!newArr) return;
+        g_recClicks = newArr;
+        g_recClickCap = newCap;
+    }
+    RecordedClick* rc = &g_recClicks[g_recClickCount++];
+    rc->x = x;
+    rc->y = y;
+    rc->timestamp = timestamp;
+    rc->bmpData = bmpData;
+    rc->bmpSize = bmpSize;
+    if (text) {
+        strncpy(rc->text, text, sizeof(rc->text) - 1);
+        rc->text[sizeof(rc->text) - 1] = '\0';
+    } else {
+        rc->text[0] = '\0';
+    }
 }
+
+/* =========================================================================
+ * 3. String & Formatting Utilities
+ * ========================================================================= */
 
 static const char* GetActionName(DWORD actionType) {
     switch (actionType) {
-    case TTP_ACTION_CLICK:     return "Click";
-    case TTP_ACTION_DBLCLICK:  return "DblClick";
-    case TTP_ACTION_RCLICK:    return "RClick";
-    case TTP_ACTION_DRAG:      return "Drag";
-    case TTP_ACTION_TYPE_TEXT: return "Type";
-    case TTP_ACTION_HOTKEY:    return "Hotkey";
-    default:                   return "Action";
+        case TTP_ACTION_CLICK:     return "Click";
+        case TTP_ACTION_DBLCLICK:  return "DblClick";
+        case TTP_ACTION_RCLICK:    return "RClick";
+        case TTP_ACTION_DRAG:      return "Drag";
+        case TTP_ACTION_TYPE_TEXT: return "Type";
+        case TTP_ACTION_HOTKEY:    return "Hotkey";
+        default:                   return "Action";
     }
 }
 
-static void GetTargetDescription(const TTPStep* step, char* out, int maxLen) {
-    if (!step || !out || maxLen <= 0) return;
-    if (step->targetMode == TTP_TARGET_TEXT) {
-        snprintf(out, maxLen, "Text: \"%s\"", step->textKey);
-    } else if (step->targetMode == TTP_TARGET_IMAGE) {
-        snprintf(out, maxLen, "Image Match");
-    } else {
-        if (step->actionType == TTP_ACTION_DRAG) {
-            snprintf(out, maxLen, "(%ld,%ld)->(%ld,%ld)", step->origX, step->origY, step->destX, step->destY);
-        } else if (step->actionType == TTP_ACTION_TYPE_TEXT) {
-            snprintf(out, maxLen, "\"%s\"", step->textKey);
-        } else if (step->actionType == TTP_ACTION_HOTKEY) {
-            snprintf(out, maxLen, "Key: %s", step->textKey);
-        } else {
-            snprintf(out, maxLen, "(%ld, %ld)", step->origX, step->origY);
-        }
+static void GetTargetDescription(const TTPStep* step, char* buf, size_t bufSize) {
+    if (step->actionType == TTP_ACTION_TYPE_TEXT) {
+        snprintf(buf, bufSize, "\"%s\"", step->textKey);
+        return;
     }
-}
-
-static void FormatTitleRec(DWORD elapsedSec, DWORD stepCount, char* out, int maxLen) {
-    snprintf(out, maxLen, "REC %02lu:%02lu (%lu steps)",
-        (unsigned long)(elapsedSec / 60),
-        (unsigned long)(elapsedSec % 60),
-        (unsigned long)stepCount);
-}
-
-static void FormatTitlePlay(DWORD elapsedSec, DWORD currentStep, DWORD totalSteps, char* out, int maxLen) {
-    snprintf(out, maxLen, "PLAY %02lu:%02lu (Step %lu/%lu)",
-        (unsigned long)(elapsedSec / 60),
-        (unsigned long)(elapsedSec % 60),
-        (unsigned long)currentStep,
-        (unsigned long)totalSteps);
-}
-
-static void FormatTitleIdle(const char* filename, char* out, int maxLen) {
-    if (filename && filename[0]) {
-        const char* slash = strrchr(filename, '\\');
-        const char* fName = slash ? slash + 1 : filename;
-        snprintf(out, maxLen, "TinyTask Pro - %s", fName);
-    } else {
-        snprintf(out, maxLen, "TinyTask Pro");
+    if (step->actionType == TTP_ACTION_DRAG) {
+        snprintf(buf, bufSize, "(%ld,%ld)->(%ld,%ld)", step->origX, step->origY, step->destX, step->destY);
+        return;
     }
+    if (step->targetMode == TTP_TARGET_TEXT && step->textKey[0] != '\0') {
+        snprintf(buf, bufSize, "[%s] (Text)", step->textKey);
+        return;
+    }
+    if (step->targetMode == TTP_TARGET_IMAGE) {
+        snprintf(buf, bufSize, "Image Anchor (%ld,%ld)", step->origX, step->origY);
+        return;
+    }
+    snprintf(buf, bufSize, "(%ld,%ld)", step->origX, step->origY);
 }
 
-static void UpdateTitle(void) {
-    if (!g_hMainWnd) return;
-    char title[128];
-    if (g_State == STATE_RECORDING) {
-        DWORD elapsed = (GetTickCount() - g_RecStartTime) / 1000;
-        FormatTitleRec(elapsed, g_recClickCount, title, sizeof(title));
-        SetWindowTextA(g_hMainWnd, title);
-    } else if (g_State == STATE_PLAYING) {
-        DWORD elapsed = (GetTickCount() - g_PlayStartTime) / 1000;
-        FormatTitlePlay(elapsed, g_CurrentPlayStep + 1, g_stepCount, title, sizeof(title));
-        SetWindowTextA(g_hMainWnd, title);
-    } else {
-        FormatTitleIdle(g_CurrentFileName, title, sizeof(title));
-        SetWindowTextA(g_hMainWnd, title);
+static void FormatTimeoutString(DWORD timeoutMs, char* buf, size_t bufSize) {
+    double sec = (double)timeoutMs / 1000.0;
+    snprintf(buf, bufSize, "%.1fs", sec);
+}
+
+static DWORD ParseTimeoutString(const char* str) {
+    while (*str == ' ' || *str == '\t') str++;
+    double sec = atof(str);
+    if (sec <= 0.05) sec = 0.1;
+    if (sec > 300.0) sec = 300.0;
+    return (DWORD)(sec * 1000.0 + 0.5);
+}
+
+static char* FindLastChar(const char* s, char c) {
+    const char* last = NULL;
+    while (*s) {
+        if (*s == c) last = s;
+        s++;
     }
+    return (char*)last;
 }
 
 /* =========================================================================
- * 3. File Loading & Saving
+ * 4. Modal Dialogs: Prompt Dialog & Hotkey Capture Dialog
  * ========================================================================= */
 
-static BOOL LoadLegacyRecFile(const char* filepath) {
-    HANDLE hFile = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
-    DWORD fSize = GetFileSize(hFile, NULL);
-    if (fSize < 20 || (fSize % 20) != 0) {
-        CloseHandle(hFile);
-        return FALSE;
-    }
-    BYTE* buf = (BYTE*)malloc(fSize);
-    if (!buf) {
-        CloseHandle(hFile);
-        return FALSE;
-    }
-    DWORD read = 0;
-    ReadFile(hFile, buf, fSize, &read, NULL);
-    CloseHandle(hFile);
+static const char* g_PromptLabel = "";
+static int  g_PromptDefault = 0;
+static int  g_PromptMin = 0;
+static int  g_PromptMax = 0;
+static int  g_PromptResult = 0;
+static BOOL g_PromptDlgRunning = FALSE;
+static HWND g_hPromptEdit = NULL;
 
-    ttp_synth_reset();
-    DWORD eventCount = read / 20;
-    for (DWORD i = 0; i < eventCount; i++) {
-        BYTE* pEv = buf + i * 20;
-        DWORD uMsg = *(DWORD*)(pEv + 0);
-        DWORD p1   = *(DWORD*)(pEv + 4);
-        DWORD p2   = *(DWORD*)(pEv + 8);
-        DWORD ts   = *(DWORD*)(pEv + 12);
-        if (uMsg == WM_MOUSEMOVE || uMsg == WM_LBUTTONDOWN || uMsg == WM_LBUTTONUP ||
-            uMsg == WM_RBUTTONDOWN || uMsg == WM_RBUTTONUP || uMsg == WM_LBUTTONDBLCLK) {
-            ttp_synth_add_mouse_event(uMsg, (LONG)p1, (LONG)p2, ts);
-        } else if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP) {
-            BYTE vk = (BYTE)(p1 & 0xFF);
-            ttp_synth_add_key_event(vk, (uMsg == WM_KEYDOWN), ts);
+static LRESULT CALLBACK PromptDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE: {
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND hStatic = CreateWindowExA(0, "STATIC", g_PromptLabel,
+            WS_CHILD | WS_VISIBLE, 15, 12, 250, 20, hwnd, NULL, g_hInstance, NULL);
+        SendMessageA(hStatic, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        char numStr[32];
+        wsprintfA(numStr, "%d", g_PromptDefault);
+        g_hPromptEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", numStr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+            15, 36, 250, 22, hwnd, (HMENU)101, g_hInstance, NULL);
+        SendMessageA(g_hPromptEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hBtnOk = CreateWindowExA(0, "BUTTON", "OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            65, 68, 70, 24, hwnd, (HMENU)IDOK, g_hInstance, NULL);
+        SendMessageA(hBtnOk, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hBtnCancel = CreateWindowExA(0, "BUTTON", "Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            150, 68, 70, 24, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+        SendMessageA(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        SetFocus(g_hPromptEdit);
+        SendMessageA(g_hPromptEdit, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    case WM_COMMAND: {
+        WORD id = LOWORD(wParam);
+        if (id == IDOK) {
+            char buf[32] = "";
+            GetWindowTextA(g_hPromptEdit, buf, sizeof(buf));
+            int val = 0;
+            for (int i = 0; buf[i]; i++) {
+                if (buf[i] >= '0' && buf[i] <= '9') val = val * 10 + (buf[i] - '0');
+            }
+            if (val < g_PromptMin) val = g_PromptMin;
+            if (val > g_PromptMax) val = g_PromptMax;
+            g_PromptResult = val;
+            g_PromptDlgRunning = FALSE;
+            DestroyWindow(hwnd);
+        } else if (id == IDCANCEL) {
+            g_PromptResult = g_PromptDefault;
+            g_PromptDlgRunning = FALSE;
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        g_PromptResult = g_PromptDefault;
+        g_PromptDlgRunning = FALSE;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
+static int PromptNumber(HWND hParent, const char* title, const char* label, int defVal, int minVal, int maxVal) {
+    static BOOL s_registered = FALSE;
+    if (!s_registered) {
+        WNDCLASSEXA wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = PromptDlgProc;
+        wc.hInstance = g_hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "TTP_PromptDlg";
+        RegisterClassExA(&wc);
+        s_registered = TRUE;
+    }
+
+    g_PromptLabel = label;
+    g_PromptDefault = defVal;
+    g_PromptMin = minVal;
+    g_PromptMax = maxVal;
+    g_PromptResult = defVal;
+    g_PromptDlgRunning = TRUE;
+
+    RECT rcParent;
+    GetWindowRect(hParent, &rcParent);
+    int posX = rcParent.left + (rcParent.right - rcParent.left - 290) / 2;
+    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 135) / 2;
+    if (posX < 0) posX = 100;
+    if (posY < 0) posY = 100;
+
+    HWND hDlg = CreateWindowExA(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        "TTP_PromptDlg", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        posX, posY, 290, 135,
+        hParent, NULL, g_hInstance, NULL
+    );
+
+    EnableWindow(hParent, FALSE);
+    MSG msg;
+    while (g_PromptDlgRunning && GetMessageA(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            SendMessageA(hDlg, WM_COMMAND, IDCANCEL, 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+            SendMessageA(hDlg, WM_COMMAND, IDOK, 0);
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+    EnableWindow(hParent, TRUE);
+    SetActiveWindow(hParent);
+    return g_PromptResult;
+}
+
+/* Modal Hotkey capture dialog */
+static BOOL g_HotkeyDlgRunning = FALSE;
+static BOOL g_HotkeyAccepted = FALSE;
+static UINT g_CapturedVk = 0;
+static UINT g_CapturedMod = 0;
+static char g_CapturedName[64] = "";
+static HWND g_hHotkeyStaticDisplay = NULL;
+
+static UINT GetCurrentModifiers(void) {
+    UINT mod = 0;
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) ||
+        (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
+        (GetAsyncKeyState(VK_RCONTROL) & 0x8000)) {
+        mod |= MOD_CONTROL;
+    }
+    if ((GetAsyncKeyState(VK_MENU) & 0x8000) ||
+        (GetAsyncKeyState(VK_LMENU) & 0x8000) ||
+        (GetAsyncKeyState(VK_RMENU) & 0x8000)) {
+        mod |= MOD_ALT;
+    }
+    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ||
+        (GetAsyncKeyState(VK_LSHIFT) & 0x8000) ||
+        (GetAsyncKeyState(VK_RSHIFT) & 0x8000)) {
+        mod |= MOD_SHIFT;
+    }
+    return mod;
+}
+
+static void FormatHotkeyText(UINT vk, UINT mod, char* out, int maxLen) {
+    out[0] = '\0';
+    if (mod & MOD_CONTROL) lstrcatA(out, "Ctrl + ");
+    if (mod & MOD_ALT)     lstrcatA(out, "Alt + ");
+    if (mod & MOD_SHIFT)   lstrcatA(out, "Shift + ");
+
+    if (vk == 0) {
+        if (mod != 0) lstrcatA(out, "...");
+        else lstrcatA(out, "[ Press any key... ]");
+        return;
+    }
+
+    if (vk >= VK_F1 && vk <= VK_F24) {
+        char fStr[16];
+        wsprintfA(fStr, "F%d", vk - VK_F1 + 1);
+        lstrcatA(out, fStr);
+    } else if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        char kStr[2] = { (char)vk, '\0' };
+        lstrcatA(out, kStr);
+    } else {
+        DWORD scan = MapVirtualKeyA(vk, 0);
+        DWORD lp = (scan << 16);
+        if (vk == VK_INSERT || vk == VK_DELETE || vk == VK_HOME || vk == VK_END ||
+            vk == VK_PRIOR || vk == VK_NEXT || vk == VK_LEFT || vk == VK_UP ||
+            vk == VK_RIGHT || vk == VK_DOWN || vk == VK_SNAPSHOT) {
+            lp |= (1 << 24);
+        }
+        char name[32] = "";
+        if (GetKeyNameTextA(lp, name, sizeof(name)) > 0) {
+            lstrcatA(out, name);
+        } else {
+            char codeStr[16];
+            wsprintfA(codeStr, "Key %d", vk);
+            lstrcatA(out, codeStr);
         }
     }
-    free(buf);
-
-    TTPStep synthSteps[1024];
-    DWORD numSteps = ttp_synth_finalize(synthSteps, 1024);
-    StepArray_Clear();
-    for (DWORD i = 0; i < numSteps; i++) {
-        StepArray_Add(&synthSteps[i], NULL, 0);
-    }
-    return TRUE;
 }
 
-static BOOL SaveProjectFile(const char* filepath) {
-    return ttp_save_project(filepath, g_steps, g_stepCount, (const BYTE**)g_bmpBuffers, g_bmpSizes);
+static LRESULT CALLBACK HotkeyDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE: {
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND hLbl = CreateWindowExA(0, "STATIC", "Press your desired key combination:",
+            WS_CHILD | WS_VISIBLE, 15, 12, 270, 18, hwnd, NULL, g_hInstance, NULL);
+        SendMessageA(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        g_hHotkeyStaticDisplay = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC",
+            g_CapturedName[0] ? g_CapturedName : "[ Press any key... ]",
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            15, 34, 270, 28, hwnd, (HMENU)101, g_hInstance, NULL);
+        SendMessageA(g_hHotkeyStaticDisplay, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hHint = CreateWindowExA(0, "STATIC", "Supports combinations like Ctrl + Alt + R, F8, etc.",
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 15, 68, 270, 16, hwnd, NULL, g_hInstance, NULL);
+        SendMessageA(hHint, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hBtnOk = CreateWindowExA(0, "BUTTON", "OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            75, 92, 70, 24, hwnd, (HMENU)IDOK, g_hInstance, NULL);
+        SendMessageA(hBtnOk, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hBtnCancel = CreateWindowExA(0, "BUTTON", "Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            160, 92, 70, 24, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+        SendMessageA(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        SetFocus(hwnd);
+        return 0;
+    }
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        UINT vk = (UINT)wParam;
+        UINT mod = GetCurrentModifiers();
+
+        if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
+            vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
+            vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
+            FormatHotkeyText(0, mod, g_CapturedName, sizeof(g_CapturedName));
+            SetWindowTextA(g_hHotkeyStaticDisplay, g_CapturedName);
+            return 0;
+        }
+
+        g_CapturedVk = vk;
+        g_CapturedMod = mod;
+        FormatHotkeyText(vk, mod, g_CapturedName, sizeof(g_CapturedName));
+        SetWindowTextA(g_hHotkeyStaticDisplay, g_CapturedName);
+        return 0;
+    }
+    case WM_COMMAND: {
+        WORD id = LOWORD(wParam);
+        if (id == IDOK) {
+            if (g_CapturedVk != 0) {
+                g_HotkeyAccepted = TRUE;
+                g_HotkeyDlgRunning = FALSE;
+                DestroyWindow(hwnd);
+            }
+        } else if (id == IDCANCEL) {
+            g_HotkeyAccepted = FALSE;
+            g_HotkeyDlgRunning = FALSE;
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        g_HotkeyAccepted = FALSE;
+        g_HotkeyDlgRunning = FALSE;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
 }
 
-static BOOL LoadProjectFile(const char* filepath) {
-    if (!filepath || !filepath[0]) return FALSE;
-    const char* ext = strrchr(filepath, '.');
-    if (ext && _stricmp(ext, ".rec") == 0) {
-        return LoadLegacyRecFile(filepath);
+static BOOL CaptureHotkey(HWND hParent, const char* title, HotkeyState* pHk) {
+    static BOOL s_registered = FALSE;
+    if (!s_registered) {
+        WNDCLASSEXA wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = HotkeyDlgProc;
+        wc.hInstance = g_hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "TTP_HotkeyDlg";
+        RegisterClassExA(&wc);
+        s_registered = TRUE;
     }
 
-    TTPStep* newSteps = NULL;
-    DWORD count = 0;
-    BYTE** newBmps = NULL;
-    DWORD* newSizes = NULL;
+    g_CapturedVk = pHk->customVk;
+    g_CapturedMod = pHk->customMod;
+    if (pHk->customSet && pHk->customName[0]) {
+        lstrcpynA(g_CapturedName, pHk->customName, sizeof(g_CapturedName));
+    } else {
+        g_CapturedName[0] = '\0';
+    }
+    g_HotkeyAccepted = FALSE;
+    g_HotkeyDlgRunning = TRUE;
 
-    if (!ttp_load_project(filepath, &newSteps, &count, &newBmps, &newSizes)) {
-        return FALSE;
+    RECT rcParent;
+    GetWindowRect(hParent, &rcParent);
+    int posX = rcParent.left + (rcParent.right - rcParent.left - 310) / 2;
+    int posY = rcParent.top + (rcParent.bottom - rcParent.top - 160) / 2;
+    if (posX < 0) posX = 100;
+    if (posY < 0) posY = 100;
+
+    HWND hDlg = CreateWindowExA(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        "TTP_HotkeyDlg", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        posX, posY, 310, 160,
+        hParent, NULL, g_hInstance, NULL
+    );
+
+    EnableWindow(hParent, FALSE);
+    MSG msg;
+    while (g_HotkeyDlgRunning && GetMessageA(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && GetCurrentModifiers() == 0) {
+            SendMessageA(hDlg, WM_COMMAND, IDCANCEL, 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && GetCurrentModifiers() == 0 && g_CapturedVk != 0) {
+            SendMessageA(hDlg, WM_COMMAND, IDOK, 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN ||
+            msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) {
+            SendMessageA(hDlg, msg.message, msg.wParam, msg.lParam);
+            if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
+                continue;
+            }
+        }
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+    EnableWindow(hParent, TRUE);
+    SetActiveWindow(hParent);
+
+    if (g_HotkeyAccepted && g_CapturedVk != 0) {
+        pHk->customVk = g_CapturedVk;
+        pHk->customMod = g_CapturedMod;
+        lstrcpynA(pHk->customName, g_CapturedName, sizeof(pHk->customName));
+        pHk->customSet = TRUE;
+        pHk->mode = 99;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* Config persistence */
+static void GetIniPath(char* buf, int maxLen) {
+    GetModuleFileNameA(NULL, buf, maxLen);
+    char* dot = FindLastChar(buf, '.');
+    if (dot) lstrcpynA(dot, ".ini", maxLen - (int)(dot - buf));
+    else lstrcatA(buf, ".ini");
+}
+
+static void WriteIniInt(const char* key, int val, const char* ini) {
+    char buf[32];
+    wsprintfA(buf, "%d", val);
+    WritePrivateProfileStringA("TinyTaskPro", key, buf, ini);
+}
+
+static void LoadConfig(void) {
+    char ini[MAX_PATH];
+    GetIniPath(ini, sizeof(ini));
+
+    g_WindowX = GetPrivateProfileIntA("TinyTaskPro", "window_x", -9999, ini);
+    g_WindowY = GetPrivateProfileIntA("TinyTaskPro", "window_y", -9999, ini);
+    g_AlwaysOnTop = GetPrivateProfileIntA("TinyTaskPro", "topmost", 0, ini);
+    g_HideCaptionsOffset = GetPrivateProfileIntA("TinyTaskPro", "hide_captions", 0, ini) ? 12 : 0;
+    g_CustomSpeed = GetPrivateProfileIntA("TinyTaskPro", "speed_custom", 5, ini);
+    if (g_CustomSpeed < 1) g_CustomSpeed = 1;
+    if (g_CustomSpeed > 100) g_CustomSpeed = 100;
+
+    int spd = GetPrivateProfileIntA("TinyTaskPro", "speed", 1, ini);
+    if (spd == 0) g_SpeedMode = SPEED_HALF;
+    else if (spd == 1) g_SpeedMode = SPEED_1X;
+    else if (spd == 2) g_SpeedMode = SPEED_2X;
+    else if (spd == 100) g_SpeedMode = SPEED_100X;
+    else { g_SpeedMode = SPEED_CUSTOM; g_CustomSpeed = spd; }
+
+    g_Continuous = GetPrivateProfileIntA("TinyTaskPro", "continuous", 0, ini);
+    g_PlayLoopTotal = GetPrivateProfileIntA("TinyTaskPro", "loops", 1, ini);
+    if (g_PlayLoopTotal < 1) g_PlayLoopTotal = 1;
+
+    g_DefaultTimeoutSec = GetPrivateProfileIntA("TinyTaskPro", "default_timeout", 3, ini);
+    if (g_DefaultTimeoutSec < 1) g_DefaultTimeoutSec = 3;
+
+    g_RecHotkey.mode = GetPrivateProfileIntA("TinyTaskPro", "record_key", 0, ini);
+    g_PlayHotkey.mode = GetPrivateProfileIntA("TinyTaskPro", "play_key", 0, ini);
+
+    g_RecHotkey.customVk = GetPrivateProfileIntA("TinyTaskPro", "custom_rec_vk", 0, ini);
+    g_RecHotkey.customMod = GetPrivateProfileIntA("TinyTaskPro", "custom_rec_mod", 0, ini);
+    GetPrivateProfileStringA("TinyTaskPro", "custom_rec_name", "", g_RecHotkey.customName, sizeof(g_RecHotkey.customName), ini);
+    if (g_RecHotkey.customVk != 0) g_RecHotkey.customSet = TRUE;
+
+    g_PlayHotkey.customVk = GetPrivateProfileIntA("TinyTaskPro", "custom_play_vk", 0, ini);
+    g_PlayHotkey.customMod = GetPrivateProfileIntA("TinyTaskPro", "custom_play_mod", 0, ini);
+    GetPrivateProfileStringA("TinyTaskPro", "custom_play_name", "", g_PlayHotkey.customName, sizeof(g_PlayHotkey.customName), ini);
+    if (g_PlayHotkey.customVk != 0) g_PlayHotkey.customSet = TRUE;
+
+    GetPrivateProfileStringA("TinyTaskPro", "toolbar_image", "", g_CustomToolbarPath, sizeof(g_CustomToolbarPath), ini);
+    if (g_CustomToolbarPath[0]) g_HasCustomToolbar = TRUE;
+}
+
+static void SaveConfig(void) {
+    char ini[MAX_PATH];
+    GetIniPath(ini, sizeof(ini));
+
+    WriteIniInt("window_x", g_WindowX, ini);
+    WriteIniInt("window_y", g_WindowY, ini);
+    WriteIniInt("topmost", g_AlwaysOnTop ? 1 : 0, ini);
+    WriteIniInt("hide_captions", g_HideCaptionsOffset ? 1 : 0, ini);
+
+    int spdVal = 1;
+    if (g_SpeedMode == SPEED_HALF) spdVal = 0;
+    else if (g_SpeedMode == SPEED_1X) spdVal = 1;
+    else if (g_SpeedMode == SPEED_2X) spdVal = 2;
+    else if (g_SpeedMode == SPEED_100X) spdVal = 100;
+    else if (g_SpeedMode == SPEED_CUSTOM) spdVal = g_CustomSpeed;
+    WriteIniInt("speed", spdVal, ini);
+    WriteIniInt("speed_custom", g_CustomSpeed, ini);
+
+    WriteIniInt("continuous", g_Continuous ? 1 : 0, ini);
+    WriteIniInt("loops", g_PlayLoopTotal, ini);
+    WriteIniInt("default_timeout", g_DefaultTimeoutSec, ini);
+
+    WriteIniInt("record_key", g_RecHotkey.mode, ini);
+    WriteIniInt("play_key", g_PlayHotkey.mode, ini);
+
+    if (g_RecHotkey.customSet) {
+        WriteIniInt("custom_rec_vk", g_RecHotkey.customVk, ini);
+        WriteIniInt("custom_rec_mod", g_RecHotkey.customMod, ini);
+        WritePrivateProfileStringA("TinyTaskPro", "custom_rec_name", g_RecHotkey.customName, ini);
     }
 
-    StepArray_Clear();
-    g_steps = newSteps;
-    g_stepCount = count;
-    g_stepCap = count;
-    g_bmpBuffers = newBmps;
-    g_bmpSizes = newSizes;
-    return TRUE;
+    if (g_PlayHotkey.customSet) {
+        WriteIniInt("custom_play_vk", g_PlayHotkey.customVk, ini);
+        WriteIniInt("custom_play_mod", g_PlayHotkey.customMod, ini);
+        WritePrivateProfileStringA("TinyTaskPro", "custom_play_name", g_PlayHotkey.customName, ini);
+    }
+
+    WritePrivateProfileStringA("TinyTaskPro", "toolbar_image", g_HasCustomToolbar ? g_CustomToolbarPath : "", ini);
+}
+
+static BOOL CheckHotkeyConflict(HWND hwnd, int newMode, UINT newVk, UINT newMod, BOOL isRecording) {
+    const HotkeyState* other = isRecording ? &g_PlayHotkey : &g_RecHotkey;
+    if (newMode != 0) {
+        if (newMode == other->mode && newMode != 99) {
+            MessageBoxA(hwnd, "Hotkey Conflict", "TinyTask Pro", MB_ICONINFORMATION);
+            return TRUE;
+        }
+        if (newMode == 99 && other->mode == 99 && newVk == other->customVk && newMod == other->customMod) {
+            MessageBoxA(hwnd, "Hotkey Conflict", "TinyTask Pro", MB_ICONINFORMATION);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void SetPresetHotkey(HWND hwnd, HotkeyState* hk, int mode, UINT vk, BOOL isRec) {
+    if (mode == 0 || !CheckHotkeyConflict(hwnd, mode, vk, 0, isRec)) {
+        hk->mode = mode;
+        SaveConfig();
+    }
+}
+
+static BOOL IsHotkeyTriggered(const HotkeyState* hk, char stdKey) {
+    if (hk->mode == 0) {
+        return ((GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+                (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+                (GetAsyncKeyState(VK_MENU) & 0x8000) &&
+                (GetAsyncKeyState(stdKey) & 0x8000));
+    }
+    if (hk->mode == 1)  return (GetAsyncKeyState(VK_SNAPSHOT) & 0x8000) != 0;
+    if (hk->mode == 8)  return (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+    if (hk->mode == 12) return (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    if (hk->mode == 99 && hk->customSet && hk->customVk != 0) {
+        UINT mod = GetCurrentModifiers();
+        if (mod == hk->customMod) {
+            return (GetAsyncKeyState(hk->customVk) & 0x8000) != 0;
+        }
+    }
+    return FALSE;
 }
 
 /* =========================================================================
- * 4. Toolbar Mask & Painting
+ * 5. Toolbar Bitmaps & GDI Rendering
  * ========================================================================= */
 
 static void CreateToolbarMask(void) {
@@ -476,12 +925,18 @@ static void CreateToolbarMask(void) {
 
 static void CreateToolbarBitmaps(void) {
     if (g_hBmpToolbar) { DeleteObject(g_hBmpToolbar); g_hBmpToolbar = NULL; }
-    g_hBmpToolbar = (HBITMAP)LoadImageA(g_hInstance, MAKEINTRESOURCEA(4002), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+    if (g_HasCustomToolbar && g_CustomToolbarPath[0]) {
+        g_hBmpToolbar = (HBITMAP)LoadImageA(NULL, g_CustomToolbarPath, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+    }
+    if (!g_hBmpToolbar) {
+        g_hBmpToolbar = (HBITMAP)LoadImageA(g_hInstance, MAKEINTRESOURCEA(4002), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+        g_HasCustomToolbar = FALSE;
+    }
     CreateToolbarMask();
 }
 
 /* =========================================================================
- * 5. ListView & In-Place Editing
+ * 6. ListView & In-Place Editing
  * ========================================================================= */
 
 static void RefreshListView(void) {
@@ -531,24 +986,6 @@ static void RefreshListView(void) {
     InvalidateRect(g_hListView, NULL, TRUE);
 }
 
-static LRESULT CALLBACK InPlaceEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-    case WM_KEYDOWN:
-        if (wParam == VK_RETURN) {
-            CommitInPlaceEdit(TRUE);
-            return 0;
-        } else if (wParam == VK_ESCAPE) {
-            CommitInPlaceEdit(FALSE);
-            return 0;
-        }
-        break;
-    case WM_KILLFOCUS:
-        CommitInPlaceEdit(TRUE);
-        return 0;
-    }
-    return CallWindowProcA(g_OldEditProc, hwnd, uMsg, wParam, lParam);
-}
-
 static void CommitInPlaceEdit(BOOL save) {
     if (!g_hInPlaceEdit) return;
     HWND hEdit = g_hInPlaceEdit;
@@ -569,6 +1006,24 @@ static void CommitInPlaceEdit(BOOL save) {
     }
     DestroyWindow(hEdit);
     SetFocus(g_hListView);
+}
+
+static LRESULT CALLBACK InPlaceEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            CommitInPlaceEdit(TRUE);
+            return 0;
+        } else if (wParam == VK_ESCAPE) {
+            CommitInPlaceEdit(FALSE);
+            return 0;
+        }
+        break;
+    case WM_KILLFOCUS:
+        CommitInPlaceEdit(TRUE);
+        return 0;
+    }
+    return CallWindowProcA(g_OldEditProc, hwnd, uMsg, wParam, lParam);
 }
 
 static void StartInPlaceTimeoutEdit(int item) {
@@ -598,136 +1053,178 @@ static void StartInPlaceTimeoutEdit(int item) {
         SendMessageA(g_hInPlaceEdit, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
     }
     g_OldEditProc = (WNDPROC)SetWindowLongPtrA(g_hInPlaceEdit, GWLP_WNDPROC, (LONG_PTR)InPlaceEditSubclassProc);
-    SendMessageA(g_hInPlaceEdit, EM_SETSEL, 0, -1);
     SetFocus(g_hInPlaceEdit);
+    SendMessageA(g_hInPlaceEdit, EM_SETSEL, 0, -1);
+}
+
+/* =========================================================================
+ * 7. Window Layout & Collapsible Drawer
+ * ========================================================================= */
+
+static void FormatTitleRec(DWORD elapsedSec, DWORD steps, char* buf, size_t bufSize) {
+    DWORD mm = elapsedSec / 60;
+    DWORD ss = elapsedSec % 60;
+    snprintf(buf, bufSize, "REC %02lu:%02lu (%lu steps)", (unsigned long)mm, (unsigned long)ss, (unsigned long)steps);
+}
+
+static void FormatTitlePlay(DWORD elapsedSec, DWORD stepIdx1Based, DWORD totalSteps, char* buf, size_t bufSize) {
+    DWORD mm = elapsedSec / 60;
+    DWORD ss = elapsedSec % 60;
+    snprintf(buf, bufSize, "PLAY %02lu:%02lu (Step %lu/%lu)",
+        (unsigned long)mm, (unsigned long)ss,
+        (unsigned long)stepIdx1Based, (unsigned long)(totalSteps > 0 ? totalSteps : 1));
+}
+
+static void FormatTitleIdle(const char* filename, char* buf, size_t bufSize) {
+    if (filename && filename[0]) {
+        snprintf(buf, bufSize, "TinyTask Pro - %s", filename);
+    } else {
+        snprintf(buf, bufSize, "TinyTask Pro");
+    }
+}
+
+static void UpdateTitle(void) {
+    if (!g_hMainWnd) return;
+    char title[128];
+    if (g_State == STATE_RECORDING) {
+        DWORD elapsed = (GetTickCount() - g_RecStartTime) / 1000;
+        FormatTitleRec(elapsed, g_stepCount, title, sizeof(title));
+    } else if (g_State == STATE_PLAYING) {
+        DWORD elapsed = (GetTickCount() - g_PlayStartTime) / 1000;
+        FormatTitlePlay(elapsed, g_CurrentPlayStep + 1, g_stepCount, title, sizeof(title));
+    } else {
+        const char* baseName = g_CurrentFileName[0] ? FindLastChar(g_CurrentFileName, '\\') : NULL;
+        FormatTitleIdle(baseName ? baseName + 1 : (g_CurrentFileName[0] ? g_CurrentFileName : NULL), title, sizeof(title));
+    }
+    SetWindowTextA(g_hMainWnd, title);
 }
 
 static void SetDrawerState(BOOL expanded) {
     g_DrawerExpanded = expanded;
+    int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
     int clientW = expanded ? CLIENT_EXPANDED_W : CLIENT_COLLAPSED_W;
-    int clientH = expanded ? CLIENT_EXPANDED_H : CLIENT_COLLAPSED_H;
-    RECT rc = { 0, 0, clientW, clientH };
-    DWORD style = GetWindowLong(g_hMainWnd, GWL_STYLE);
-    DWORD exStyle = GetWindowLong(g_hMainWnd, GWL_EXSTYLE);
-    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    int clientH = expanded ? CLIENT_EXPANDED_H : (effectiveH + 2 * TOOLBAR_PADDING);
 
-    SetWindowPos(g_hMainWnd, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT rc = { 0, 0, clientW, clientH };
+    AdjustWindowRectEx(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+
+    SetWindowPos(g_hMainWnd, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER);
 
     int showCmd = expanded ? SW_SHOW : SW_HIDE;
     if (g_hListView) ShowWindow(g_hListView, showCmd);
-    if (g_hBtnAdd)   ShowWindow(g_hBtnAdd, showCmd);
-    if (g_hBtnDel)   ShowWindow(g_hBtnDel, showCmd);
-    if (g_hBtnUp)    ShowWindow(g_hBtnUp, showCmd);
-    if (g_hBtnDown)  ShowWindow(g_hBtnDown, showCmd);
-    if (g_hBtnRun)   ShowWindow(g_hBtnRun, showCmd);
+    if (g_hBtnAdd)  ShowWindow(g_hBtnAdd, showCmd);
+    if (g_hBtnDel)  ShowWindow(g_hBtnDel, showCmd);
+    if (g_hBtnUp)   ShowWindow(g_hBtnUp, showCmd);
+    if (g_hBtnDown) ShowWindow(g_hBtnDown, showCmd);
+    if (g_hBtnRun)  ShowWindow(g_hBtnRun, showCmd);
 
-    if (expanded) {
-        RefreshListView();
-    }
     InvalidateRect(g_hMainWnd, NULL, TRUE);
 }
 
 /* =========================================================================
- * 6. Recording & Synthesizer Integration
+ * 8. Project Storage Integration
  * ========================================================================= */
 
-static void AddRecordedClick(LONG x, LONG y, DWORD timestamp, BYTE* bmpData, DWORD bmpSize, const char* text) {
-    if (g_recClickCount >= g_recClickCap) {
-        DWORD newCap = (g_recClickCap == 0) ? 16 : g_recClickCap * 2;
-        RecordedClick* newBuf = (RecordedClick*)realloc(g_recClicks, newCap * sizeof(RecordedClick));
-        if (!newBuf) return;
-        g_recClicks = newBuf;
-        g_recClickCap = newCap;
-    }
-    RecordedClick* rc = &g_recClicks[g_recClickCount++];
-    rc->x = x;
-    rc->y = y;
-    rc->timestamp = timestamp;
-    rc->bmpData = bmpData;
-    rc->bmpSize = bmpSize;
-    if (text) {
-        strncpy(rc->text, text, sizeof(rc->text) - 1);
-        rc->text[sizeof(rc->text) - 1] = '\0';
-    } else {
-        rc->text[0] = '\0';
-    }
+static BOOL SaveProjectFile(const char* filepath) {
+    return ttp_save_project(filepath, g_steps, g_stepCount, (const BYTE**)g_bmpBuffers, g_bmpSizes);
 }
 
-static void ClearRecordedClicks(void) {
-    if (g_recClicks) {
-        for (DWORD i = 0; i < g_recClickCount; i++) {
-            if (g_recClicks[i].bmpData) {
-                ttp_free_bmp_buffer(g_recClicks[i].bmpData);
-                g_recClicks[i].bmpData = NULL;
-            }
+static BOOL LoadProjectFile(const char* filepath) {
+    TTPStep* loadedSteps = NULL;
+    DWORD loadedCount = 0;
+    BYTE** loadedBmps = NULL;
+    DWORD* loadedSizes = NULL;
+
+    if (ttp_load_project(filepath, &loadedSteps, &loadedCount, &loadedBmps, &loadedSizes)) {
+        StepArray_Clear();
+        for (DWORD i = 0; i < loadedCount; i++) {
+            StepArray_Add(&loadedSteps[i], loadedBmps ? loadedBmps[i] : NULL, loadedSizes ? loadedSizes[i] : 0);
         }
-        free(g_recClicks);
-        g_recClicks = NULL;
+        ttp_free_project(loadedSteps, loadedBmps, loadedSizes, loadedCount);
+        return TRUE;
     }
-    g_recClickCount = 0;
-    g_recClickCap = 0;
+    return FALSE;
 }
+
+/* =========================================================================
+ * 9. Recording Engine
+ * ========================================================================= */
 
 static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
+    (void)hwnd; (void)uMsg; (void)idEvent; (void)dwTime;
     if (g_State != STATE_RECORDING) return;
 
     POINT pt;
     GetCursorPos(&pt);
-    DWORD tick = GetTickCount();
+    DWORD now = GetTickCount();
 
     if (pt.x != g_LastMousePos.x || pt.y != g_LastMousePos.y) {
+        ttp_synth_add_mouse_event(WM_MOUSEMOVE, pt.x, pt.y, now);
         g_LastMousePos = pt;
-        ttp_synth_add_mouse_event(WM_MOUSEMOVE, pt.x, pt.y, tick);
     }
 
-    for (int vk = 1; vk < 256; vk++) {
-        SHORT state = GetAsyncKeyState(vk);
-        BYTE isDown = (state & 0x8000) ? 1 : 0;
-        if (isDown != g_LastKeyState[vk]) {
-            g_LastKeyState[vk] = isDown;
-            if (vk == VK_LBUTTON) {
-                if (isDown) {
-                    HWND hUnder = WindowFromPoint(pt);
-                    /* Ignore clicks on TinyTask window */
-                    if (hUnder != g_hMainWnd && GetAncestor(hUnder, GA_ROOT) != g_hMainWnd) {
-                        HDC hdcScreen = GetDC(NULL);
-                        RECT cropRect;
-                        BYTE* bmpData = NULL;
-                        DWORD bmpSize = 0;
-                        ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &cropRect, &bmpData, &bmpSize);
-                        ReleaseDC(NULL, hdcScreen);
+    SHORT lState = GetAsyncKeyState(VK_LBUTTON);
+    BOOL lDown = (lState & 0x8000) != 0;
+    BOOL prevLDown = (g_LastKeyState[VK_LBUTTON] & 0x8000) != 0;
 
-                        char textBuf[128] = {0};
-                        if (hUnder) {
-                            if (GetWindowTextA(hUnder, textBuf, sizeof(textBuf)) <= 0) {
-                                SendMessageTimeoutA(hUnder, WM_GETTEXT, sizeof(textBuf), (LPARAM)textBuf, SMTO_ABORTIFHUNG, 50, NULL);
-                            }
-                        }
-                        AddRecordedClick(pt.x, pt.y, tick, bmpData, bmpSize, textBuf);
-                    }
-                    ttp_synth_add_mouse_event(WM_LBUTTONDOWN, pt.x, pt.y, tick);
-                } else {
-                    ttp_synth_add_mouse_event(WM_LBUTTONUP, pt.x, pt.y, tick);
-                }
-            } else if (vk == VK_RBUTTON) {
-                ttp_synth_add_mouse_event(isDown ? WM_RBUTTONDOWN : WM_RBUTTONUP, pt.x, pt.y, tick);
-            } else if (vk != VK_SHIFT && vk != VK_CONTROL && vk != VK_MENU) {
-                ttp_synth_add_key_event(vk, isDown, tick);
-            }
+    if (lDown && !prevLDown) {
+        ttp_synth_add_mouse_event(WM_LBUTTONDOWN, pt.x, pt.y, now);
+
+        BYTE* bmpBuf = NULL;
+        DWORD bmpSize = 0;
+        RECT buttonRect = {0};
+        HDC hdcScreen = GetDC(NULL);
+        if (ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &buttonRect, &bmpBuf, &bmpSize)) {
+            // Adaptive crop acquired
+        }
+        ReleaseDC(NULL, hdcScreen);
+
+        POINT foundCenters[8];
+        int count = ttp_find_elements_by_text("", foundCenters, 8);
+        (void)count;
+
+        AddRecordedClick(pt.x, pt.y, now, bmpBuf, bmpSize, "");
+    } else if (!lDown && prevLDown) {
+        ttp_synth_add_mouse_event(WM_LBUTTONUP, pt.x, pt.y, now);
+    }
+    g_LastKeyState[VK_LBUTTON] = (BYTE)(lDown ? 0x80 : 0);
+
+    SHORT rState = GetAsyncKeyState(VK_RBUTTON);
+    BOOL rDown = (rState & 0x8000) != 0;
+    BOOL prevRDown = (g_LastKeyState[VK_RBUTTON] & 0x8000) != 0;
+
+    if (rDown && !prevRDown) {
+        ttp_synth_add_mouse_event(WM_RBUTTONDOWN, pt.x, pt.y, now);
+    } else if (!rDown && prevRDown) {
+        ttp_synth_add_mouse_event(WM_RBUTTONUP, pt.x, pt.y, now);
+    }
+    g_LastKeyState[VK_RBUTTON] = (BYTE)(rDown ? 0x80 : 0);
+
+    for (int vk = 8; vk < 256; vk++) {
+        if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_CANCEL) continue;
+        SHORT ks = GetAsyncKeyState(vk);
+        BOOL isDown = (ks & 0x8000) != 0;
+        BOOL wasDown = (g_LastKeyState[vk] & 0x8000) != 0;
+
+        if (isDown != wasDown) {
+            ttp_synth_add_key_event((DWORD)vk, isDown, now);
+            g_LastKeyState[vk] = (BYTE)(isDown ? 0x80 : 0);
         }
     }
-
     UpdateTitle();
 }
 
 static void StartRecording(void) {
     if (g_State == STATE_PLAYING) StopPlayback();
-    g_State = STATE_RECORDING;
-    ttp_synth_reset();
+    StepArray_Clear();
     ClearRecordedClicks();
+    ttp_synth_init();
+
     GetCursorPos(&g_LastMousePos);
-    ZeroMemory(g_LastKeyState, sizeof(g_LastKeyState));
+    memset(g_LastKeyState, 0, sizeof(g_LastKeyState));
+
     g_RecStartTime = GetTickCount();
+    g_State = STATE_RECORDING;
     SetTimer(g_hMainWnd, TIMER_REC, 10, RecTimerProc);
     InvalidateRect(g_hMainWnd, NULL, FALSE);
     UpdateTitle();
@@ -737,13 +1234,16 @@ static void StopRecording(void) {
     KillTimer(g_hMainWnd, TIMER_REC);
     g_State = STATE_IDLE;
 
-    TTPStep tempSteps[512];
-    DWORD numFinal = ttp_synth_finalize(tempSteps, 512);
+    TTPStep tempSteps[128];
+    DWORD finalizedCount = ttp_synth_finalize(tempSteps, 128);
 
-    StepArray_Clear();
-    for (DWORD i = 0; i < numFinal; i++) {
+    for (DWORD i = 0; i < finalizedCount; i++) {
+        if (tempSteps[i].timeoutMs == 0) {
+            tempSteps[i].timeoutMs = g_DefaultTimeoutSec * 1000;
+        }
+
+        double bestDist = 999999.0;
         int bestClickIdx = -1;
-        double bestDist = 1000000.0;
         for (DWORD c = 0; c < g_recClickCount; c++) {
             double d = ttp_calc_euclidean_dist(tempSteps[i].origX, tempSteps[i].origY, g_recClicks[c].x, g_recClicks[c].y);
             if (d < bestDist) {
@@ -776,7 +1276,7 @@ static void StopRecording(void) {
 }
 
 /* =========================================================================
- * 7. Playback Engine
+ * 10. Playback Engine
  * ========================================================================= */
 
 static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam) {
@@ -789,11 +1289,16 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam) {
             PostMessageA(g_hMainWnd, WM_USER_PLAY_UPDATE, (WPARAM)i, (LPARAM)loop);
 
             TTPStep step = g_steps[i];
-            if (g_SpeedMode == 0) {
+            if (g_SpeedMode == SPEED_HALF) {
                 step.postDelayMs = (DWORD)(step.postDelayMs * 2.0);
-            } else if (g_SpeedMode == 2) {
+            } else if (g_SpeedMode == SPEED_2X) {
                 step.postDelayMs = (DWORD)(step.postDelayMs * 0.5);
+            } else if (g_SpeedMode == SPEED_100X) {
+                step.postDelayMs = (DWORD)(step.postDelayMs / 100);
+            } else if (g_SpeedMode == SPEED_CUSTOM && g_CustomSpeed > 0) {
+                step.postDelayMs = (DWORD)(step.postDelayMs / g_CustomSpeed);
             }
+            if (step.postDelayMs < 1) step.postDelayMs = 1;
 
             BOOL ok = ttp_playback_step(&step, g_bmpBuffers[i], g_bmpSizes[i], g_hMainWnd);
             if (!ok || g_StopPlaybackRequested) {
@@ -801,7 +1306,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam) {
             }
         }
         loop++;
-        if (!g_Continuous) {
+        if (!g_Continuous && loop >= g_PlayLoopTotal) {
             break;
         }
     }
@@ -842,6 +1347,16 @@ static void StopPlayback(void) {
 
 static void CALLBACK HotkeyTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
     (void)hwnd; (void)uMsg; (void)idEvent; (void)dwTime;
+    if (IsHotkeyTriggered(&g_RecHotkey, 'R')) {
+        Sleep(150);
+        PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_REC, 0);
+        return;
+    }
+    if (IsHotkeyTriggered(&g_PlayHotkey, 'P')) {
+        Sleep(150);
+        PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_PLAY, 0);
+        return;
+    }
     if (g_State == STATE_PLAYING) {
         if ((GetAsyncKeyState(VK_PAUSE) & 0x8000) || (GetAsyncKeyState(VK_SCROLL) & 0x8000)) {
             StopPlayback();
@@ -850,19 +1365,78 @@ static void CALLBACK HotkeyTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWO
 }
 
 /* =========================================================================
- * 8. Options Menu
+ * 11. Options Menu (Full Preferences Matching TinyTask + Pro Extensions)
  * ========================================================================= */
 
 static void ShowOptionsMenu(HWND hwnd, int x, int y) {
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == 0 ? MF_CHECKED : 0), ID_OPT_SPEED_HALF, "Play Speed:   \xbd");
-    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == 1 ? MF_CHECKED : 0), ID_OPT_SPEED_1X, "Play Speed:   &1x");
-    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == 2 ? MF_CHECKED : 0), ID_OPT_SPEED_2X, "Play Speed:   &2x");
+    HMENU hRecHot = CreatePopupMenu();
+    HMENU hPlayHot = CreatePopupMenu();
+
+    /* Speed options */
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_HALF ? MF_CHECKED : 0), ID_OPT_SPEED_HALF, "Play Speed:   \xbd");
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_1X ? MF_CHECKED : 0), ID_OPT_SPEED_1X, "Play Speed:   &1x");
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_2X ? MF_CHECKED : 0), ID_OPT_SPEED_2X, "Play Speed:   &2x");
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_100X ? MF_CHECKED : 0), ID_OPT_SPEED_100X, "Play Speed:   100x");
+
+    char customSpeedStr[64];
+    wsprintfA(customSpeedStr, "&Play Custom Speed:  %dx", g_CustomSpeed);
+    AppendMenuA(hMenu, MF_STRING | (g_SpeedMode == SPEED_CUSTOM ? MF_CHECKED : 0), ID_OPT_SPEED_CUSTOM, customSpeedStr);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_SET_SPEED, "&Set Custom Speed...");
+
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hMenu, MF_STRING | (g_Continuous ? MF_CHECKED : 0), ID_OPT_CONT, "&Continuous Playback");
+
+    char loopStr[64];
+    wsprintfA(loopStr, "&Set Playback Loops...  (%lu)", (unsigned long)g_PlayLoopTotal);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_SET_LOOPS, loopStr);
+
+    AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+
+    /* Recording Hotkey submenu */
+    AppendMenuA(hRecHot, MF_STRING | (g_RecHotkey.mode == 0 ? MF_CHECKED : 0), ID_REC_HOTKEY_STD, "Control + Shift + Alt + R");
+    AppendMenuA(hRecHot, MF_STRING | (g_RecHotkey.mode == 1 ? MF_CHECKED : 0), ID_REC_HOTKEY_PRTSC, "Print Screen");
+    AppendMenuA(hRecHot, MF_STRING | (g_RecHotkey.mode == 8 ? MF_CHECKED : 0), ID_REC_HOTKEY_F8, "F8");
+    AppendMenuA(hRecHot, MF_STRING | (g_RecHotkey.mode == 12 ? MF_CHECKED : 0), ID_REC_HOTKEY_F12, "F12");
+    if (g_RecHotkey.customSet) {
+        char customStr[80];
+        wsprintfA(customStr, "Custom:  %s", g_RecHotkey.customName);
+        AppendMenuA(hRecHot, MF_STRING | (g_RecHotkey.mode == 99 ? MF_CHECKED : 0), ID_REC_HOTKEY_CUSTOM_ACTIVE, customStr);
+    }
+    AppendMenuA(hRecHot, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hRecHot, MF_STRING, ID_REC_HOTKEY_CUSTOM_SET, "&Set Custom Hotkey...");
+    AppendMenuA(hMenu, MF_POPUP, (UINT_PTR)hRecHot, "Recording &Hotkey");
+
+    /* Playback Hotkey submenu */
+    AppendMenuA(hPlayHot, MF_STRING | (g_PlayHotkey.mode == 0 ? MF_CHECKED : 0), ID_PLAY_HOTKEY_STD, "Control + Shift + Alt + P");
+    AppendMenuA(hPlayHot, MF_STRING | (g_PlayHotkey.mode == 1 ? MF_CHECKED : 0), ID_PLAY_HOTKEY_PRTSC, "Print Screen");
+    AppendMenuA(hPlayHot, MF_STRING | (g_PlayHotkey.mode == 8 ? MF_CHECKED : 0), ID_PLAY_HOTKEY_F8, "F8");
+    AppendMenuA(hPlayHot, MF_STRING | (g_PlayHotkey.mode == 12 ? MF_CHECKED : 0), ID_PLAY_HOTKEY_F12, "F12");
+    if (g_PlayHotkey.customSet) {
+        char customStr[80];
+        wsprintfA(customStr, "Custom:  %s", g_PlayHotkey.customName);
+        AppendMenuA(hPlayHot, MF_STRING | (g_PlayHotkey.mode == 99 ? MF_CHECKED : 0), ID_PLAY_HOTKEY_CUSTOM_ACTIVE, customStr);
+    }
+    AppendMenuA(hPlayHot, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hPlayHot, MF_STRING, ID_PLAY_HOTKEY_CUSTOM_SET, "&Set Custom Hotkey...");
+    AppendMenuA(hPlayHot, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hPlayHot, MF_STRING | MF_GRAYED, 0, "\x95 Hint:  Press {PAUSE} or {ScrollLock} to stop playbacks");
+    AppendMenuA(hMenu, MF_POPUP, (UINT_PTR)hPlayHot, "Playback Hot&key");
+
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hMenu, MF_STRING | (g_AlwaysOnTop ? MF_CHECKED : 0), ID_OPT_TOPMOST, "Always on &Top");
+    AppendMenuA(hMenu, MF_STRING | (g_HideCaptionsOffset == 0 ? MF_CHECKED : 0), ID_OPT_SHOW_CAPTIONS, "Show Captions");
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_TOOLBAR_CUSTOM, "Use Custom Tool&bar...");
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_TOOLBAR_DEFAULT, "Use &Default Toolbar");
+
+    AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+    char timeoutMenuStr[64];
+    wsprintfA(timeoutMenuStr, "Set Default Step &Timeout...  (%lu s)", (unsigned long)g_DefaultTimeoutSec);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_DEFAULT_TIMEOUT, timeoutMenuStr);
+
+    AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_WEBSITE, "TinyTask &Website");
     AppendMenuA(hMenu, MF_STRING, ID_OPT_ABOUT, "&About TinyTask Pro...");
 
     TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, x, y, 0, hwnd, NULL);
@@ -870,7 +1444,7 @@ static void ShowOptionsMenu(HWND hwnd, int x, int y) {
 }
 
 /* =========================================================================
- * 9. Main Window Procedure
+ * 12. Main Window Procedure
  * ========================================================================= */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -878,6 +1452,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_CREATE: {
         g_hMainWnd = hwnd;
         g_hGuiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        LoadConfig();
         CreateToolbarBitmaps();
 
         /* Collapsible SysListView32 child control */
@@ -934,6 +1509,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         HBRUSH hbrBg = GetSysColorBrush(COLOR_BTNFACE);
         FillRect(hdc, &rcClient, hbrBg);
 
+        int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
+
         if (g_hBmpToolbar && g_hBmpMask) {
             HDC hdcMem = CreateCompatibleDC(hdc);
 
@@ -950,26 +1527,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 int dst_x = TOOLBAR_PADDING + i * (BUTTON_WIDTH + TOOLBAR_PADDING);
                 int dst_y = TOOLBAR_PADDING;
 
-                HGDIOBJ hOld = SelectObject(hdcMem, g_hBmpMask);
-                BitBlt(hdc, dst_x, dst_y, BUTTON_WIDTH, BUTTON_HEIGHT, hdcMem, src_x, src_y, SRCAND);
+                HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, g_hBmpMask);
+                BitBlt(hdc, dst_x, dst_y, BUTTON_WIDTH, effectiveH, hdcMem, src_x, src_y, SRCAND);
 
                 SelectObject(hdcMem, g_hBmpToolbar);
-                BitBlt(hdc, dst_x, dst_y, BUTTON_WIDTH, BUTTON_HEIGHT, hdcMem, src_x, src_y, SRCPAINT);
+                BitBlt(hdc, dst_x, dst_y, BUTTON_WIDTH, effectiveH, hdcMem, src_x, src_y, SRCPAINT);
 
                 SelectObject(hdcMem, hOld);
-
-                if (i == 4 && g_DrawerExpanded) {
-                    RECT rcBtn = { dst_x - 1, dst_y - 1, dst_x + BUTTON_WIDTH + 1, dst_y + BUTTON_HEIGHT + 1 };
-                    DrawEdge(hdc, &rcBtn, BDR_SUNKENOUTER, BF_RECT);
-                }
             }
-
             DeleteDC(hdcMem);
-        }
-
-        if (g_DrawerExpanded) {
-            RECT rcSep = { 0, 51, rcClient.right, 53 };
-            DrawEdge(hdc, &rcSep, EDGE_ETCHED, BF_TOP);
         }
 
         EndPaint(hwnd, &ps);
@@ -981,7 +1547,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            if (pt.y >= TOOLBAR_PADDING && pt.y < TOOLBAR_PADDING + BUTTON_HEIGHT &&
+            int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
+            if (pt.y >= TOOLBAR_PADDING && pt.y < TOOLBAR_PADDING + effectiveH &&
                 pt.x >= TOOLBAR_PADDING && pt.x < TOOLBAR_PADDING + NUM_BUTTONS * (BUTTON_WIDTH + TOOLBAR_PADDING)) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 return TRUE;
@@ -995,8 +1562,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_LBUTTONDOWN: {
         int x = (short)LOWORD(lParam);
         int y = (short)HIWORD(lParam);
+        int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
 
-        if (y >= TOOLBAR_PADDING && y < TOOLBAR_PADDING + BUTTON_HEIGHT) {
+        if (y >= TOOLBAR_PADDING && y < TOOLBAR_PADDING + effectiveH) {
             for (int i = 0; i < NUM_BUTTONS; i++) {
                 int bx = TOOLBAR_PADDING + i * (BUTTON_WIDTH + TOOLBAR_PADDING);
                 if (x >= bx && x < bx + BUTTON_WIDTH) {
@@ -1094,36 +1662,176 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
 
         case ID_PRO_OPTIONS: {
-            POINT pt = { TOOLBAR_PADDING + 5 * (BUTTON_WIDTH + TOOLBAR_PADDING), TOOLBAR_PADDING + BUTTON_HEIGHT };
+            int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
+            POINT pt = { TOOLBAR_PADDING + 5 * (BUTTON_WIDTH + TOOLBAR_PADDING), TOOLBAR_PADDING + effectiveH };
             ClientToScreen(hwnd, &pt);
             ShowOptionsMenu(hwnd, pt.x, pt.y);
             break;
         }
 
         case ID_OPT_SPEED_HALF: {
-            g_SpeedMode = 0;
+            g_SpeedMode = SPEED_HALF;
+            SaveConfig();
             break;
         }
         case ID_OPT_SPEED_1X: {
-            g_SpeedMode = 1;
+            g_SpeedMode = SPEED_1X;
+            SaveConfig();
             break;
         }
         case ID_OPT_SPEED_2X: {
-            g_SpeedMode = 2;
+            g_SpeedMode = SPEED_2X;
+            SaveConfig();
             break;
         }
+        case ID_OPT_SPEED_100X: {
+            g_SpeedMode = SPEED_100X;
+            SaveConfig();
+            break;
+        }
+        case ID_OPT_SPEED_CUSTOM: {
+            g_SpeedMode = SPEED_CUSTOM;
+            SaveConfig();
+            break;
+        }
+        case ID_OPT_SET_SPEED: {
+            int val = PromptNumber(hwnd, "Playback Speed", "Enter playback speed multiplier (1x - 100x):", g_CustomSpeed, 1, 100);
+            if (val >= 1 && val <= 100) {
+                g_CustomSpeed = val;
+                g_SpeedMode = SPEED_CUSTOM;
+                SaveConfig();
+            }
+            break;
+        }
+
         case ID_OPT_CONT: {
             g_Continuous = !g_Continuous;
+            SaveConfig();
             break;
         }
+        case ID_OPT_SET_LOOPS: {
+            int loops = PromptNumber(hwnd, "Playback Loops", "Enter number of playback loops:", g_PlayLoopTotal, 1, 999999);
+            if (loops >= 1) {
+                g_PlayLoopTotal = loops;
+                SaveConfig();
+            }
+            break;
+        }
+
+        /* Hotkey preset selections */
+        case ID_REC_HOTKEY_STD:   SetPresetHotkey(hwnd, &g_RecHotkey, 0, 0, TRUE); break;
+        case ID_REC_HOTKEY_PRTSC: SetPresetHotkey(hwnd, &g_RecHotkey, 1, VK_SNAPSHOT, TRUE); break;
+        case ID_REC_HOTKEY_F8:    SetPresetHotkey(hwnd, &g_RecHotkey, 8, VK_F8, TRUE); break;
+        case ID_REC_HOTKEY_F12:   SetPresetHotkey(hwnd, &g_RecHotkey, 12, VK_F12, TRUE); break;
+        case ID_REC_HOTKEY_CUSTOM_ACTIVE: {
+            if (g_RecHotkey.customSet) {
+                g_RecHotkey.mode = 99;
+                SaveConfig();
+            }
+            break;
+        }
+        case ID_REC_HOTKEY_CUSTOM_SET: {
+            HotkeyState tempHk = g_RecHotkey;
+            if (CaptureHotkey(hwnd, "Set Recording Hotkey", &tempHk)) {
+                if (!CheckHotkeyConflict(hwnd, 99, tempHk.customVk, tempHk.customMod, TRUE)) {
+                    g_RecHotkey = tempHk;
+                    SaveConfig();
+                }
+            }
+            break;
+        }
+
+        case ID_PLAY_HOTKEY_STD:   SetPresetHotkey(hwnd, &g_PlayHotkey, 0, 0, FALSE); break;
+        case ID_PLAY_HOTKEY_PRTSC: SetPresetHotkey(hwnd, &g_PlayHotkey, 1, VK_SNAPSHOT, FALSE); break;
+        case ID_PLAY_HOTKEY_F8:    SetPresetHotkey(hwnd, &g_PlayHotkey, 8, VK_F8, FALSE); break;
+        case ID_PLAY_HOTKEY_F12:   SetPresetHotkey(hwnd, &g_PlayHotkey, 12, VK_F12, FALSE); break;
+        case ID_PLAY_HOTKEY_CUSTOM_ACTIVE: {
+            if (g_PlayHotkey.customSet) {
+                g_PlayHotkey.mode = 99;
+                SaveConfig();
+            }
+            break;
+        }
+        case ID_PLAY_HOTKEY_CUSTOM_SET: {
+            HotkeyState tempHk = g_PlayHotkey;
+            if (CaptureHotkey(hwnd, "Set Playback Hotkey", &tempHk)) {
+                if (!CheckHotkeyConflict(hwnd, 99, tempHk.customVk, tempHk.customMod, FALSE)) {
+                    g_PlayHotkey = tempHk;
+                    SaveConfig();
+                }
+            }
+            break;
+        }
+
         case ID_OPT_TOPMOST: {
             g_AlwaysOnTop = !g_AlwaysOnTop;
             SetWindowPos(hwnd, g_AlwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SaveConfig();
             break;
         }
+
+        case ID_OPT_SHOW_CAPTIONS: {
+            g_HideCaptionsOffset = (g_HideCaptionsOffset == 0) ? 12 : 0;
+            SetDrawerState(g_DrawerExpanded);
+            SaveConfig();
+            break;
+        }
+
+        case ID_OPT_TOOLBAR_CUSTOM: {
+            char path[MAX_PATH] = "";
+            OPENFILENAMEA ofn = {0};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = "Bitmap Files (*.bmp)\0*.bmp\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = path;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                strncpy(g_CustomToolbarPath, path, MAX_PATH - 1);
+                g_HasCustomToolbar = TRUE;
+                CreateToolbarBitmaps();
+                InvalidateRect(hwnd, NULL, FALSE);
+                SaveConfig();
+            }
+            break;
+        }
+
+        case ID_OPT_TOOLBAR_DEFAULT: {
+            g_HasCustomToolbar = FALSE;
+            g_CustomToolbarPath[0] = '\0';
+            CreateToolbarBitmaps();
+            InvalidateRect(hwnd, NULL, FALSE);
+            SaveConfig();
+            break;
+        }
+
+        case ID_OPT_DEFAULT_TIMEOUT: {
+            int toSec = PromptNumber(hwnd, "Default Step Timeout", "Enter default step search timeout in seconds:", g_DefaultTimeoutSec, 1, 60);
+            if (toSec >= 1 && toSec <= 60) {
+                g_DefaultTimeoutSec = toSec;
+                SaveConfig();
+            }
+            break;
+        }
+
+        case ID_OPT_WEBSITE: {
+            ShellExecuteA(NULL, "open", "https://tinytask.net", NULL, NULL, SW_SHOWNORMAL);
+            break;
+        }
+
         case ID_OPT_ABOUT: {
             MessageBoxA(hwnd,
-                "TinyTask Pro 1.0\n\nNext-Gen Macro Automation with Computer Vision & Text Anchors.\nEngineered for Pixel-Perfect Reliability.",
+                "TinyTask Pro 1.0 (Win32 Native)\n\n"
+                "Next-Gen Ultra-Lightweight Macro Automation (< 100KB)\n"
+                "Inspired by Microsoft Power Automate with Computer Vision & Text Anchors.\n\n"
+                "Key Capabilities:\n"
+                "* Pure-C Adaptive Edge Detection & Button Cropping\n"
+                "* Dual-Track Recognition (Win32 UIA Text + NCC Template Matching)\n"
+                "* Euclidean Nearest-Neighbor Disambiguation for Multiple Matches\n"
+                "* Collapsible Workflow Steps Drawer (SysListView32)\n"
+                "* Per-Step Configurable Timeouts with Retry/Fallback Dialog\n"
+                "* Self-Contained Project Packaging (.ttp)\n\n"
+                "(C) TinyTask Pro Open Architecture",
                 "About TinyTask Pro", MB_ICONINFORMATION);
             break;
         }
@@ -1135,7 +1843,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             s.targetMode = TTP_TARGET_COORD;
             s.origX = 100;
             s.origY = 100;
-            s.timeoutMs = 3000;
+            s.timeoutMs = g_DefaultTimeoutSec * 1000;
             s.postDelayMs = 100;
             StepArray_Add(&s, NULL, 0);
             RefreshListView();
@@ -1213,7 +1921,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         return 0;
     }
 
+    case WM_MOVE: {
+        if (!IsIconic(hwnd)) {
+            RECT rc;
+            GetWindowRect(hwnd, &rc);
+            g_WindowX = rc.left;
+            g_WindowY = rc.top;
+        }
+        return 0;
+    }
+
     case WM_DESTROY: {
+        SaveConfig();
         KillTimer(hwnd, TIMER_HOTKEY);
         if (g_State == STATE_RECORDING) StopRecording();
         if (g_State == STATE_PLAYING) StopPlayback();
@@ -1230,7 +1949,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 }
 
 /* =========================================================================
- * 10. Application Entry Point
+ * 13. Application Entry Point
  * ========================================================================= */
 
 #ifndef TTP_TEST_MODE
@@ -1248,33 +1967,44 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(4001), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
+    wc.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(4001));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = "TinyTaskProWnd";
-    RegisterClassExA(&wc);
+    wc.lpszClassName = "TinyTaskProClass";
+    wc.hIconSm = LoadIconA(hInstance, MAKEINTRESOURCEA(4001));
 
-    RECT rc = { 0, 0, CLIENT_COLLAPSED_W, CLIENT_COLLAPSED_H };
-    DWORD dwStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    if (!RegisterClassExA(&wc)) {
+        return 1;
+    }
 
-    int posX = (GetSystemMetrics(SM_CXSCREEN) - (rc.right - rc.left)) / 2;
-    int posY = (GetSystemMetrics(SM_CYSCREEN) - (rc.bottom - rc.top)) / 2;
+    LoadConfig();
 
-    HWND hwnd = CreateWindowExA(0, "TinyTaskProWnd", "TinyTask Pro",
-        dwStyle, posX, posY, rc.right - rc.left, rc.bottom - rc.top,
-        NULL, NULL, hInstance, NULL);
+    int effectiveH = BUTTON_HEIGHT - g_HideCaptionsOffset;
+    RECT rc = { 0, 0, CLIENT_COLLAPSED_W, effectiveH + 2 * TOOLBAR_PADDING };
+    AdjustWindowRectEx(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
 
-    if (!hwnd) return 1;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    int x = (g_WindowX != -9999) ? g_WindowX : (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
+    int y = (g_WindowY != -9999) ? g_WindowY : (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
+
+    HWND hwnd = CreateWindowExA(
+        g_AlwaysOnTop ? WS_EX_TOPMOST : 0,
+        "TinyTaskProClass", "TinyTask Pro",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        x, y, w, h,
+        NULL, NULL, hInstance, NULL
+    );
+
+    if (!hwnd) {
+        return 1;
+    }
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {
-        if (g_hInPlaceEdit && IsDialogMessageA(g_hInPlaceEdit, &msg)) {
-            continue;
-        }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
