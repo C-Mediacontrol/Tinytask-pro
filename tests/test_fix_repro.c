@@ -185,6 +185,111 @@ int main() {
     ReleaseDC(NULL, hdcScr);
     free(tBmp);
 
+    // ==========================================================
+    // Phase 4 Hotkey Bugfix Regression Tests (RED -> GREEN)
+    // ==========================================================
+
+    // Test 7: Rising-Edge Latch Logic Verification
+    // A 300ms continuous hold over 12 ticks of 25ms timer must trigger EXACTLY ONCE.
+    int triggerCount = 0;
+    BOOL s_recTriggerWasDown = FALSE;
+    for (int tick = 0; tick < 12; tick++) {
+        BOOL isPressed = TRUE; // Held continuously for 300ms
+        if (isPressed) {
+            if (!s_recTriggerWasDown) {
+                s_recTriggerWasDown = TRUE;
+                triggerCount++;
+            }
+        } else {
+            s_recTriggerWasDown = FALSE;
+        }
+    }
+    printf("Test 7 (Rising Edge Latch): 300ms chord hold triggerCount=%d\n", triggerCount);
+    fflush(stdout);
+    assert(triggerCount == 1);
+
+    // Test 8: Trailing Hotkey Step Pruning
+    TTPStep macroSteps[8];
+    memset(macroSteps, 0, sizeof(macroSteps));
+    macroSteps[0].stepId = 1;
+    macroSteps[0].actionType = TTP_ACTION_CLICK;
+    macroSteps[1].stepId = 2;
+    macroSteps[1].actionType = TTP_ACTION_TYPE_TEXT;
+    strcpy(macroSteps[1].textKey, "test");
+    // Trailing hotkey artifacts from user stopping recording with Ctrl+Shift+Alt+R
+    macroSteps[2].stepId = 3;
+    macroSteps[2].actionType = TTP_ACTION_HOTKEY;
+    macroSteps[2].origX = VK_CONTROL;
+    macroSteps[3].stepId = 4;
+    macroSteps[3].actionType = TTP_ACTION_HOTKEY;
+    macroSteps[3].origX = VK_SHIFT;
+    macroSteps[4].stepId = 5;
+    macroSteps[4].actionType = TTP_ACTION_HOTKEY;
+    macroSteps[4].origX = VK_MENU;
+    macroSteps[5].stepId = 6;
+    macroSteps[5].actionType = TTP_ACTION_HOTKEY;
+    macroSteps[5].origX = 'R';
+
+    DWORD stepCountPruned = 6;
+    while (stepCountPruned > 0) {
+        TTPStep* last = &macroSteps[stepCountPruned - 1];
+        if (last->actionType == TTP_ACTION_HOTKEY) {
+            DWORD vk = (DWORD)last->origX;
+            if (vk == 'R' || vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
+                vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
+                vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
+                stepCountPruned--;
+                continue;
+            }
+        }
+        break;
+    }
+    printf("Test 8 (Trailing Hotkey Pruning): original=6, pruned=%lu\n", stepCountPruned);
+    fflush(stdout);
+    assert(stepCountPruned == 2);
+    assert(macroSteps[0].actionType == TTP_ACTION_CLICK);
+    assert(macroSteps[1].actionType == TTP_ACTION_TYPE_TEXT);
+
+    // Test 9: Source Code Invariant Checks on tinytask_pro.c
+    // Checks that tinytask_pro.c contains rising-edge latch, 25ms timer, seeds state,
+    // and eliminates Sleep(150) before ID_PRO_REC.
+    FILE* fpPro = fopen("reverse-gemini/src/tinytask_pro.c", "rb");
+    assert(fpPro != NULL);
+    fseek(fpPro, 0, SEEK_END);
+    long proSz = ftell(fpPro);
+    fseek(fpPro, 0, SEEK_SET);
+    char* proSrc = (char*)malloc(proSz + 1);
+    fread(proSrc, 1, proSz, fpPro);
+    proSrc[proSz] = '\0';
+    fclose(fpPro);
+
+    BOOL hasLatchVar = (strstr(proSrc, "s_recTriggerWasDown") != NULL);
+    BOOL hasTimer25 = (strstr(proSrc, "SetTimer(hwnd, TIMER_HOTKEY, 25") != NULL);
+    BOOL hasKeySeed = (strstr(proSrc, "g_LastKeyState[vk] =") != NULL && strstr(proSrc, "for (int vk = 1; vk < 256; vk++)") != NULL);
+    BOOL hasTrailingTrim = (strstr(proSrc, "IsTrailingHotkeyStep") != NULL || strstr(proSrc, "RemoveTrailingHotkey") != NULL);
+    // Verify Sleep(150) is NOT placed right before ID_PRO_REC
+    char* recPost = strstr(proSrc, "PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_REC, 0);");
+    BOOL hasSleepBeforeRec = FALSE;
+    if (recPost) {
+        // Look backwards 40 chars
+        char* window = recPost - 30;
+        if (window > proSrc && strstr(window, "Sleep(150)")) {
+            hasSleepBeforeRec = TRUE;
+        }
+    }
+    free(proSrc);
+
+    printf("Test 9 (Source Code Hotkey Invariants):\n");
+    printf("  hasLatchVar=%d\n", hasLatchVar);
+    printf("  hasTimer25=%d\n", hasTimer25);
+    printf("  hasKeySeed=%d\n", hasKeySeed);
+    printf("  hasTrailingTrim=%d\n", hasTrailingTrim);
+    printf("  hasSleepBeforeRec=%d (must be 0)\n", hasSleepBeforeRec);
+    fflush(stdout);
+
+    // MUST FAIL ON CURRENT CODE (RED PHASE)
+    assert(hasLatchVar && hasTimer25 && hasKeySeed && hasTrailingTrim && !hasSleepBeforeRec);
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");

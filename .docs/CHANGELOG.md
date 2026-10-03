@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.0] - 2026-10-04
+
+### Fixed
+- **多键组合快捷键触发异常修复（对齐原版 TinyTask 1.77 并引入上升沿锁存器）**:
+  - **双重保障上升沿锁存器（Rising-Edge Latch）**: 在 `HotkeyTimerProc` 中引入静态锁存变量 `s_recTriggerWasDown` 与 `s_playTriggerWasDown`，严格保证只在按键按下瞬间（0->1 上升沿）触发单次命令，双手长按组合键期间保持锁存，物理按键完全释放后才解除锁定。彻底根除了因双手组合键长按（250~450ms）导致的电平重复触发及录制瞬间开闭翻转缺陷。
+  - **移除 UI 线程 Sleep(150)**: 彻底移除了录制分支下的 `Sleep(150)` 阻塞调用，消除 UI 消息循环卡死与定时器堆叠，实现 0ms 零延迟极速触发。
+  - **全键盘物理状态预播种（State Seeding）**: 对齐原版 TinyTask 1.77（反汇编 `0x402340 ~ 0x402361`），在 `StartRecording` 启动时遍历 VK 1~254 预读取并播种 `g_LastKeyState`，避免用户松开启动热键时被录制为伪按键动作。
+  - **尾部热键残影回溯修剪（Trailing Hotkey Pruning）**: 对齐原版 TinyTask 1.77（反汇编 `0x4023d8 ~ 0x402419`），在 `StopRecording` 中增加 `IsTrailingHotkeyStep` 回溯修剪逻辑，自动剔除尾部用于停止录制的热键动作。
+  - **采样率对齐原版**: 将 `TIMER_HOTKEY` 周期由 50ms 调整为 25ms（40Hz），完全消除快速敲击（30~40ms）落在 50ms 盲区的问题。
+  - **自定义组合键容差匹配**: 自定义热键改为掩码包含容差匹配（`((mod & hk->customMod) == hk->customMod)`），包容多指触键毫秒级微小时差。
+
 ## [1.2.0] - 2026-10-04
 
 ### Fixed

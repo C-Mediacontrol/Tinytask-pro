@@ -908,8 +908,35 @@ static BOOL IsHotkeyTriggered(const HotkeyState* hk, char stdKey) {
     if (hk->mode == 12) return (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
     if (hk->mode == 99 && hk->customSet && hk->customVk != 0) {
         UINT mod = GetCurrentModifiers();
-        if (mod == hk->customMod) {
+        if ((mod & hk->customMod) == hk->customMod) {
             return (GetAsyncKeyState(hk->customVk) & 0x8000) != 0;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL IsTrailingHotkeyStep(const TTPStep* step, const HotkeyState* hk, char stdKey) {
+    if (!step) return FALSE;
+    DWORD targetVk = 0;
+    if (hk->mode == 0) targetVk = (DWORD)stdKey;
+    else if (hk->mode == 1) targetVk = VK_SNAPSHOT;
+    else if (hk->mode == 8) targetVk = VK_F8;
+    else if (hk->mode == 12) targetVk = VK_F12;
+    else if (hk->mode == 99 && hk->customSet) targetVk = hk->customVk;
+
+    if (step->actionType == TTP_ACTION_HOTKEY) {
+        DWORD vk = (DWORD)step->origX;
+        if (vk == targetVk || vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
+            vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
+            vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
+            return TRUE;
+        }
+    } else if (step->actionType == TTP_ACTION_TYPE_TEXT) {
+        if (targetVk != 0 && strlen(step->textKey) == 1) {
+            char c = step->textKey[0];
+            if (c == (char)targetVk || c == (char)tolower((int)targetVk) || c == (char)toupper((int)targetVk)) {
+                return TRUE;
+            }
         }
     }
     return FALSE;
@@ -1257,7 +1284,9 @@ static void StartRecording(void) {
     ttp_synth_init();
 
     GetCursorPos(&g_LastMousePos);
-    memset(g_LastKeyState, 0, sizeof(g_LastKeyState));
+    for (int vk = 1; vk < 256; vk++) {
+        g_LastKeyState[vk] = (BYTE)((GetAsyncKeyState(vk) & 0x8000) ? 1 : 0);
+    }
 
     g_RecStartTime = GetTickCount();
     g_State = STATE_RECORDING;
@@ -1272,6 +1301,10 @@ static void StopRecording(void) {
 
     TTPStep tempSteps[128];
     DWORD finalizedCount = ttp_synth_finalize(tempSteps, 128);
+
+    while (finalizedCount > 0 && IsTrailingHotkeyStep(&tempSteps[finalizedCount - 1], &g_RecHotkey, 'R')) {
+        finalizedCount--;
+    }
 
     BOOL usedClicks[256] = {0};
     for (DWORD i = 0; i < finalizedCount; i++) {
@@ -1386,16 +1419,29 @@ static void StopPlayback(void) {
 
 static void CALLBACK HotkeyTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
     (void)hwnd; (void)uMsg; (void)idEvent; (void)dwTime;
-    if (IsHotkeyTriggered(&g_RecHotkey, 'R')) {
-        Sleep(150);
-        PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_REC, 0);
-        return;
+    static BOOL s_recTriggerWasDown = FALSE;
+    static BOOL s_playTriggerWasDown = FALSE;
+
+    BOOL recDown = IsHotkeyTriggered(&g_RecHotkey, 'R');
+    if (recDown) {
+        if (!s_recTriggerWasDown) {
+            s_recTriggerWasDown = TRUE;
+            PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_REC, 0);
+        }
+    } else {
+        s_recTriggerWasDown = FALSE;
     }
-    if (IsHotkeyTriggered(&g_PlayHotkey, 'P')) {
-        Sleep(150);
-        PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_PLAY, 0);
-        return;
+
+    BOOL playDown = IsHotkeyTriggered(&g_PlayHotkey, 'P');
+    if (playDown) {
+        if (!s_playTriggerWasDown) {
+            s_playTriggerWasDown = TRUE;
+            PostMessageA(g_hMainWnd, WM_COMMAND, ID_PRO_PLAY, 0);
+        }
+    } else {
+        s_playTriggerWasDown = FALSE;
     }
+
     if (g_State == STATE_PLAYING) {
         if ((GetAsyncKeyState(VK_PAUSE) & 0x8000) || (GetAsyncKeyState(VK_SCROLL) & 0x8000)) {
             StopPlayback();
@@ -1536,7 +1582,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             244, 322, 126, 26, hwnd, (HMENU)ID_BTN_STEP_RUN, g_hInstance, NULL);
         SendMessageA(g_hBtnRun, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        SetTimer(hwnd, TIMER_HOTKEY, 50, HotkeyTimerProc);
+        SetTimer(hwnd, TIMER_HOTKEY, 25, HotkeyTimerProc);
         UpdateTitle();
         return 0;
     }
