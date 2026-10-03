@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <oleacc.h>
 
 /* =========================================================================
  * 1. Euclidean Distance & Spatial Disambiguation
@@ -391,6 +392,18 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         return FALSE;
     }
 
+    /* Tier-1: Localized ROI match around initial coordinate hint (<5ms) */
+    if (outMatchPos && (outMatchPos->x > 0 || outMatchPos->y > 0)) {
+        POINT roiPt = *outMatchPos;
+        double roiScore = 0.0;
+        if (ttp_match_template_ncc_roi(hdc, roiPt.x, roiPt.y, 250, bmpPattern, bmpSize, minScore, &roiPt, &roiScore)) {
+            *outMatchPos = roiPt;
+            if (outScore) *outScore = roiScore;
+            if (releaseDC) ReleaseDC(NULL, hdc);
+            return TRUE;
+        }
+    }
+
     int tStride = ((tw * 3 + 3) / 4) * 4;
     const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
     int N = tw * th;
@@ -533,10 +546,14 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     int bestX = 0;
     int bestY = 0;
 
-    for (int y = 0; y <= maxY; y++) {
+    /* Power Automate Hierarchical Coarse-to-Fine Search:
+     * Pass 1: Coarse sampling with stride 4 in screen and stride 2 in template (<15ms)
+     */
+    const int STRIDE = 4;
+    for (int y = 0; y <= maxY; y += STRIDE) {
         int y1 = y;
         int y2 = y + th;
-        for (int x = 0; x <= maxX; x++) {
+        for (int x = 0; x <= maxX; x += STRIDE) {
             int x1 = x;
             int x2 = x + tw;
 
@@ -546,25 +563,64 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                          - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
 
             double varI = sumI2 - (sumI * sumI) / N;
-            if (varI <= 1e-4) {
-                continue;
-            }
+            if (varI <= 1e-4) continue;
 
             double denomI = sqrt(varI);
             double num = 0.0;
-            for (int v = 0; v < th; v++) {
+            for (int v = 0; v < th; v += 2) {
                 const double* pS = &S[(y + v) * screenW + x];
                 const double* pnT = &nT[v * tw];
-                for (int u = 0; u < tw; u++) {
+                for (int u = 0; u < tw; u += 2) {
                     num += pnT[u] * pS[u];
                 }
             }
-
-            double score = num / denomI;
+            double score = (num * 4.0) / denomI;
             if (score > bestScore) {
                 bestScore = score;
                 bestX = x;
                 bestY = y;
+            }
+        }
+    }
+
+    /* Pass 2: Fine full-resolution polish in +-STRIDE around coarse peak (<2ms) */
+    if (bestScore > 0.45) {
+        int fineX0 = max(0, bestX - STRIDE);
+        int fineX1 = min(maxX, bestX + STRIDE);
+        int fineY0 = max(0, bestY - STRIDE);
+        int fineY1 = min(maxY, bestY + STRIDE);
+
+        for (int y = fineY0; y <= fineY1; y++) {
+            int y1 = y;
+            int y2 = y + th;
+            for (int x = fineX0; x <= fineX1; x++) {
+                int x1 = x;
+                int x2 = x + tw;
+
+                double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
+                            - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
+                double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
+                             - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
+
+                double varI = sumI2 - (sumI * sumI) / N;
+                if (varI <= 1e-4) continue;
+
+                double denomI = sqrt(varI);
+                double num = 0.0;
+                for (int v = 0; v < th; v++) {
+                    const double* pS = &S[(y + v) * screenW + x];
+                    const double* pnT = &nT[v * tw];
+                    for (int u = 0; u < tw; u++) {
+                        num += pnT[u] * pS[u];
+                    }
+                }
+
+                double score = num / denomI;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestX = x;
+                    bestY = y;
+                }
             }
         }
     }
@@ -587,6 +643,209 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     }
 
     return FALSE;
+}
+
+BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
+    if (!bmpPattern || bmpSize < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
+        if (outScore) *outScore = 0.0;
+        return FALSE;
+    }
+    if (roiRadius <= 0) roiRadius = 200;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    int x0 = roiX - roiRadius; if (x0 < 0) x0 = 0;
+    int y0 = roiY - roiRadius; if (y0 < 0) y0 = 0;
+    int x1 = roiX + roiRadius; if (x1 > screenW) x1 = screenW;
+    int y1 = roiY + roiRadius; if (y1 > screenH) y1 = screenH;
+
+    int roiW = x1 - x0;
+    int roiH = y1 - y0;
+    if (roiW <= 20 || roiH <= 20) return FALSE;
+
+    const BITMAPFILEHEADER* bmfh = (const BITMAPFILEHEADER*)bmpPattern;
+    const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
+    int tw = bmih->biWidth;
+    int th = abs(bmih->biHeight);
+    BOOL isBottomUp = (bmih->biHeight > 0);
+    if (roiW < tw || roiH < th) return FALSE;
+
+    HDC hdc = hdcScreen ? hdcScreen : GetDC(NULL);
+    HDC hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem) return FALSE;
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = roiW;
+    bi.bmiHeader.biHeight = -roiH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = NULL;
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hBmp || !pBits) {
+        DeleteDC(hdcMem);
+        if (!hdcScreen) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+
+    HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
+    BitBlt(hdcMem, 0, 0, roiW, roiH, hdc, x0, y0, SRCCOPY);
+    GdiFlush();
+
+    int N = tw * th;
+    double* T = (double*)malloc(N * sizeof(double));
+    int tStride = ((tw * 3 + 3) / 4) * 4;
+    const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
+    double sumT = 0.0;
+    for (int y = 0; y < th; y++) {
+        int bmpRow = isBottomUp ? (th - 1 - y) : y;
+        const BYTE* row = tPixels + bmpRow * tStride;
+        for (int x = 0; x < tw; x++) {
+            double lum = 0.299 * row[x * 3 + 2] + 0.587 * row[x * 3 + 1] + 0.114 * row[x * 3 + 0];
+            T[y * tw + x] = lum;
+            sumT += lum;
+        }
+    }
+    double meanT = sumT / N;
+    double sumSqDiffT = 0.0;
+    for (int i = 0; i < N; i++) {
+        double d = T[i] - meanT;
+        sumSqDiffT += d * d;
+    }
+    double denomT = sqrt(sumSqDiffT);
+    if (denomT < 1e-6) {
+        free(T);
+        SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem);
+        if (!hdcScreen) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+    double* nT = (double*)malloc(N * sizeof(double));
+    for (int i = 0; i < N; i++) nT[i] = (T[i] - meanT) / denomT;
+    free(T);
+
+    double* S = (double*)malloc(roiW * roiH * sizeof(double));
+    const BYTE* srcPx = (const BYTE*)pBits;
+    for (int y = 0; y < roiH; y++) {
+        for (int x = 0; x < roiW; x++) {
+            const BYTE* px = srcPx + (y * roiW + x) * 4;
+            S[y * roiW + x] = 0.299 * px[2] + 0.587 * px[1] + 0.114 * px[0];
+        }
+    }
+
+    SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem);
+    if (!hdcScreen) ReleaseDC(NULL, hdc);
+
+    int satStride = roiW + 1;
+    double* sat1 = (double*)calloc(satStride * (roiH + 1), sizeof(double));
+    double* sat2 = (double*)calloc(satStride * (roiH + 1), sizeof(double));
+    for (int y = 0; y < roiH; y++) {
+        double r1 = 0.0, r2 = 0.0;
+        for (int x = 0; x < roiW; x++) {
+            double v = S[y * roiW + x];
+            r1 += v; r2 += v * v;
+            sat1[(y + 1) * satStride + (x + 1)] = sat1[y * satStride + (x + 1)] + r1;
+            sat2[(y + 1) * satStride + (x + 1)] = sat2[y * satStride + (x + 1)] + r2;
+        }
+    }
+
+    int maxX = roiW - tw;
+    int maxY = roiH - th;
+    double bestScore = -1.0;
+    int bestX = 0, bestY = 0;
+
+    for (int y = 0; y <= maxY; y += 2) {
+        int y1 = y; int y2 = y + th;
+        for (int x = 0; x <= maxX; x += 2) {
+            int x1 = x; int x2 = x + tw;
+            double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
+                        - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
+            double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
+                         - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
+            double varI = sumI2 - (sumI * sumI) / N;
+            if (varI <= 1e-4) continue;
+            double denomI = sqrt(varI);
+            double num = 0.0;
+            for (int v = 0; v < th; v += 2) {
+                const double* pS = &S[(y + v) * roiW + x];
+                const double* pnT = &nT[v * tw];
+                for (int u = 0; u < tw; u += 2) num += pnT[u] * pS[u];
+            }
+            double score = (num * 4.0) / denomI;
+            if (score > bestScore) {
+                bestScore = score;
+                bestX = x; bestY = y;
+            }
+        }
+    }
+
+    if (bestScore > 0.40) {
+        int fx0 = max(0, bestX - 2); int fx1 = min(maxX, bestX + 2);
+        int fy0 = max(0, bestY - 2); int fy1 = min(maxY, bestY + 2);
+        for (int y = fy0; y <= fy1; y++) {
+            int y1 = y; int y2 = y + th;
+            for (int x = fx0; x <= fx1; x++) {
+                int x1 = x; int x2 = x + tw;
+                double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
+                            - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
+                double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
+                             - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
+                double varI = sumI2 - (sumI * sumI) / N;
+                if (varI <= 1e-4) continue;
+                double denomI = sqrt(varI);
+                double num = 0.0;
+                for (int v = 0; v < th; v++) {
+                    const double* pS = &S[(y + v) * roiW + x];
+                    const double* pnT = &nT[v * tw];
+                    for (int u = 0; u < tw; u++) num += pnT[u] * pS[u];
+                }
+                double score = num / denomI;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestX = x; bestY = y;
+                }
+            }
+        }
+    }
+
+    free(sat1); free(sat2); free(S); free(nT);
+    if (outScore) *outScore = (bestScore < -1.0) ? 0.0 : bestScore;
+    if (bestScore >= minScore) {
+        if (outMatchPos) {
+            outMatchPos->x = x0 + bestX + tw / 2;
+            outMatchPos->y = y0 + bestY + th / 2;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL ttp_get_accessible_name_at_point(POINT pt, char* outName, int maxLen) {
+    if (!outName || maxLen <= 0) return FALSE;
+    outName[0] = '\0';
+
+    CoInitialize(NULL);
+    IAccessible* pAcc = NULL;
+    VARIANT varChild;
+    VariantInit(&varChild);
+
+    HRESULT hr = AccessibleObjectFromPoint(pt, &pAcc, &varChild);
+    if (SUCCEEDED(hr) && pAcc) {
+        BSTR bstrName = NULL;
+        pAcc->lpVtbl->get_accName(pAcc, varChild, &bstrName);
+        if (bstrName) {
+            WideCharToMultiByte(CP_ACP, 0, bstrName, -1, outName, maxLen - 1, NULL, NULL);
+            outName[maxLen - 1] = '\0';
+            SysFreeString(bstrName);
+        }
+        VariantClear(&varChild);
+        pAcc->lpVtbl->Release(pAcc);
+    }
+    CoUninitialize();
+    return (outName[0] != '\0');
 }
 
 /* =========================================================================

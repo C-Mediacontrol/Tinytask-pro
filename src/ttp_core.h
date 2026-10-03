@@ -20,6 +20,17 @@
 #define TTP_MAGIC "TTP1"
 #define TTP_VERSION 1
 
+/* Timeout fallback actions (stored in targetMode high 16-bits) */
+#define TTP_TIMEOUT_ACT_DEFAULT       0 /* Show modal prompt */
+#define TTP_TIMEOUT_ACT_RETRY         1 /* Retry until found */
+#define TTP_TIMEOUT_ACT_USE_RECORDED  2 /* Click recorded coordinate */
+#define TTP_TIMEOUT_ACT_SKIP          3 /* Skip step */
+#define TTP_TIMEOUT_ACT_STOP          4 /* Stop playback */
+
+#define TTP_GET_BASE_TARGET_MODE(m)     ((DWORD)((m) & 0x0000FFFF))
+#define TTP_GET_TIMEOUT_ACTION(m)       ((int)(((m) >> 16) & 0x0000FFFF))
+#define TTP_MAKE_TARGET_MODE(base, act) (((DWORD)(base) & 0x0000FFFF) | (((DWORD)(act) & 0x0000FFFF) << 16))
+
 #pragma pack(push, 1)
 
 typedef struct {

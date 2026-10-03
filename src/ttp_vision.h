@@ -24,17 +24,17 @@ int ttp_pick_nearest_candidate(LONG origX, LONG origY, const POINT* candidates, 
 BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRect, BYTE** outBmp, DWORD* outBmpSize);
 
 /* Pure-C Normalized Cross-Correlation (NCC) template matcher:
- * Takes screen DC (or bitmap) and a template BMP buffer.
- * Performs fast sliding-window NCC match.
+ * Uses Power Automate hierarchical coarse-to-fine pyramid search (<25ms).
  * If best peak score >= minScore, fills outMatchPos with center (x, y) and returns TRUE.
  */
 BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore);
 
-/* UI Automation / Accessible text locator helper:
- * Finds bounding centers of all controls matching targetText in foreground / desktop window.
- * Returns count of found elements (up to maxCount).
- */
-int ttp_find_elements_by_text(const char* targetText, POINT* outCenters, int maxCount);
+/* Fast localized ROI NCC matcher (searches within roiRadius of (roiX, roiY), takes <5ms) */
+BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore);
+
+/* UI Automation / Accessible text locator helpers */
+BOOL ttp_get_accessible_name_at_point(POINT pt, char* outName, int maxLen);
+int  ttp_find_elements_by_text(const char* targetText, POINT* outCenters, int maxCount);
 
 void ttp_free_bmp_buffer(BYTE* bmpBuffer);
 

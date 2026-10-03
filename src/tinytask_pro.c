@@ -389,17 +389,32 @@ static void GetTargetDescription(const TTPStep* step, char* buf, size_t bufSize)
     snprintf(buf, bufSize, "(%ld,%ld)", step->origX, step->origY);
 }
 
-static void FormatTimeoutString(DWORD timeoutMs, char* buf, size_t bufSize) {
-    double sec = (double)timeoutMs / 1000.0;
-    snprintf(buf, bufSize, "%.1fs", sec);
+static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) {
+    double sec = (double)step->timeoutMs / 1000.0;
+    int act = TTP_GET_TIMEOUT_ACTION(step->targetMode);
+    const char* tag = "";
+    if (act == TTP_TIMEOUT_ACT_RETRY) tag = " [Retry]";
+    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) tag = " [Coord]";
+    else if (act == TTP_TIMEOUT_ACT_SKIP) tag = " [Skip]";
+    else if (act == TTP_TIMEOUT_ACT_STOP) tag = " [Stop]";
+    else tag = " [Prompt]";
+    snprintf(buf, bufSize, "%.1fs%s", sec, tag);
 }
 
-static DWORD ParseTimeoutString(const char* str) {
+static void ParseTimeoutString(const char* str, DWORD* outTimeoutMs, int* outAction) {
     while (*str == ' ' || *str == '\t') str++;
     double sec = atof(str);
     if (sec <= 0.05) sec = 0.1;
     if (sec > 300.0) sec = 300.0;
-    return (DWORD)(sec * 1000.0 + 0.5);
+    if (outTimeoutMs) *outTimeoutMs = (DWORD)(sec * 1000.0 + 0.5);
+
+    if (outAction) {
+        if (strstr(str, "retry") || strstr(str, "Retry") || strstr(str, " 1")) *outAction = TTP_TIMEOUT_ACT_RETRY;
+        else if (strstr(str, "coord") || strstr(str, "Coord") || strstr(str, " 2")) *outAction = TTP_TIMEOUT_ACT_USE_RECORDED;
+        else if (strstr(str, "skip") || strstr(str, "Skip") || strstr(str, " 3")) *outAction = TTP_TIMEOUT_ACT_SKIP;
+        else if (strstr(str, "stop") || strstr(str, "Stop") || strstr(str, " 4")) *outAction = TTP_TIMEOUT_ACT_STOP;
+        else if (strstr(str, "prompt") || strstr(str, "Prompt") || strstr(str, " 0")) *outAction = TTP_TIMEOUT_ACT_DEFAULT;
+    }
 }
 
 static char* FindLastChar(const char* s, char c) {
@@ -964,8 +979,8 @@ static void RefreshListView(void) {
         GetTargetDescription(&g_steps[i], targetDesc, sizeof(targetDesc));
         ListView_SetItemText(g_hListView, i, 2, targetDesc);
 
-        char timeoutStr[32];
-        FormatTimeoutString(g_steps[i].timeoutMs, timeoutStr, sizeof(timeoutStr));
+        char timeoutStr[64];
+        FormatTimeoutString(&g_steps[i], timeoutStr, sizeof(timeoutStr));
         ListView_SetItemText(g_hListView, i, 3, timeoutStr);
 
         char assetStr[32];
@@ -996,11 +1011,15 @@ static void CommitInPlaceEdit(BOOL save) {
     if (save && item >= 0 && item < (int)g_stepCount) {
         char buf[64] = {0};
         GetWindowTextA(hEdit, buf, sizeof(buf));
-        DWORD newTimeout = ParseTimeoutString(buf);
+        DWORD newTimeout = 0;
+        int newAction = TTP_GET_TIMEOUT_ACTION(g_steps[item].targetMode);
+        ParseTimeoutString(buf, &newTimeout, &newAction);
         if (newTimeout > 0) {
             g_steps[item].timeoutMs = newTimeout;
-            char outStr[32];
-            FormatTimeoutString(newTimeout, outStr, sizeof(outStr));
+            DWORD baseMode = TTP_GET_BASE_TARGET_MODE(g_steps[item].targetMode);
+            g_steps[item].targetMode = TTP_MAKE_TARGET_MODE(baseMode, newAction);
+            char outStr[64];
+            FormatTimeoutString(&g_steps[item], outStr, sizeof(outStr));
             ListView_SetItemText(g_hListView, item, 3, outStr);
         }
     }
@@ -1158,6 +1177,13 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
     GetCursorPos(&pt);
     DWORD now = GetTickCount();
 
+    HWND hUnder = WindowFromPoint(pt);
+    BOOL onSelf = (hUnder == g_hMainWnd || (hUnder != NULL && IsChild(g_hMainWnd, hUnder)));
+    if (onSelf) {
+        // Discard any mouse interactions over TinyTask Pro itself (e.g. clicking Stop)
+        return;
+    }
+
     if (pt.x != g_LastMousePos.x || pt.y != g_LastMousePos.y) {
         ttp_synth_add_mouse_event(WM_MOUSEMOVE, pt.x, pt.y, now);
         g_LastMousePos = pt;
@@ -1165,7 +1191,7 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
 
     SHORT lState = GetAsyncKeyState(VK_LBUTTON);
     BOOL lDown = (lState & 0x8000) != 0;
-    BOOL prevLDown = (g_LastKeyState[VK_LBUTTON] & 0x8000) != 0;
+    BOOL prevLDown = (g_LastKeyState[VK_LBUTTON] != 0);
 
     if (lDown && !prevLDown) {
         ttp_synth_add_mouse_event(WM_LBUTTONDOWN, pt.x, pt.y, now);
@@ -1179,36 +1205,35 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
         }
         ReleaseDC(NULL, hdcScreen);
 
-        POINT foundCenters[8];
-        int count = ttp_find_elements_by_text("", foundCenters, 8);
-        (void)count;
+        char accName[128] = {0};
+        ttp_get_accessible_name_at_point(pt, accName, sizeof(accName));
 
-        AddRecordedClick(pt.x, pt.y, now, bmpBuf, bmpSize, "");
+        AddRecordedClick(pt.x, pt.y, now, bmpBuf, bmpSize, accName);
     } else if (!lDown && prevLDown) {
         ttp_synth_add_mouse_event(WM_LBUTTONUP, pt.x, pt.y, now);
     }
-    g_LastKeyState[VK_LBUTTON] = (BYTE)(lDown ? 0x80 : 0);
+    g_LastKeyState[VK_LBUTTON] = (BYTE)(lDown ? 1 : 0);
 
     SHORT rState = GetAsyncKeyState(VK_RBUTTON);
     BOOL rDown = (rState & 0x8000) != 0;
-    BOOL prevRDown = (g_LastKeyState[VK_RBUTTON] & 0x8000) != 0;
+    BOOL prevRDown = (g_LastKeyState[VK_RBUTTON] != 0);
 
     if (rDown && !prevRDown) {
         ttp_synth_add_mouse_event(WM_RBUTTONDOWN, pt.x, pt.y, now);
     } else if (!rDown && prevRDown) {
         ttp_synth_add_mouse_event(WM_RBUTTONUP, pt.x, pt.y, now);
     }
-    g_LastKeyState[VK_RBUTTON] = (BYTE)(rDown ? 0x80 : 0);
+    g_LastKeyState[VK_RBUTTON] = (BYTE)(rDown ? 1 : 0);
 
     for (int vk = 8; vk < 256; vk++) {
         if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_CANCEL) continue;
         SHORT ks = GetAsyncKeyState(vk);
         BOOL isDown = (ks & 0x8000) != 0;
-        BOOL wasDown = (g_LastKeyState[vk] & 0x8000) != 0;
+        BOOL wasDown = (g_LastKeyState[vk] != 0);
 
         if (isDown != wasDown) {
             ttp_synth_add_key_event((DWORD)vk, isDown, now);
-            g_LastKeyState[vk] = (BYTE)(isDown ? 0x80 : 0);
+            g_LastKeyState[vk] = (BYTE)(isDown ? 1 : 0);
         }
     }
     UpdateTitle();
@@ -1237,6 +1262,7 @@ static void StopRecording(void) {
     TTPStep tempSteps[128];
     DWORD finalizedCount = ttp_synth_finalize(tempSteps, 128);
 
+    BOOL usedClicks[256] = {0};
     for (DWORD i = 0; i < finalizedCount; i++) {
         if (tempSteps[i].timeoutMs == 0) {
             tempSteps[i].timeoutMs = g_DefaultTimeoutSec * 1000;
@@ -1244,7 +1270,8 @@ static void StopRecording(void) {
 
         double bestDist = 999999.0;
         int bestClickIdx = -1;
-        for (DWORD c = 0; c < g_recClickCount; c++) {
+        for (DWORD c = 0; c < g_recClickCount && c < 256; c++) {
+            if (usedClicks[c]) continue;
             double d = ttp_calc_euclidean_dist(tempSteps[i].origX, tempSteps[i].origY, g_recClicks[c].x, g_recClicks[c].y);
             if (d < bestDist) {
                 bestDist = d;
@@ -1253,6 +1280,7 @@ static void StopRecording(void) {
         }
 
         if (bestClickIdx >= 0 && bestDist < 100.0) {
+            usedClicks[bestClickIdx] = TRUE;
             RecordedClick* rc = &g_recClicks[bestClickIdx];
             if (rc->text[0] != '\0') {
                 tempSteps[i].targetMode = TTP_TARGET_TEXT;

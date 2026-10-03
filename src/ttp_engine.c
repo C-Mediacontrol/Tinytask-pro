@@ -84,6 +84,7 @@ static void synth_flush_text(void) {
 }
 
 void ttp_synth_init(void) {
+    ttp_register_timeout_dialog_class(NULL);
     ttp_synth_reset();
 }
 
@@ -136,7 +137,9 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
         synth_flush_text();
 
         double dist = ttp_calc_euclidean_dist(g_lDownX, g_lDownY, x, y);
-        if (dist > 6.0) {
+        int sysDrag = GetSystemMetrics(SM_CXDRAG);
+        double dragThresh = (sysDrag > 0 && sysDrag * 3 > 20) ? (double)(sysDrag * 3) : 20.0;
+        if (dist > dragThresh) {
             /* Drag threshold exceeded -> TTP_ACTION_DRAG */
             SynthAction act;
             memset(&act, 0, sizeof(act));
@@ -156,12 +159,15 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
             UINT dblClickTime = GetDoubleClickTime();
             if (dblClickTime == 0) dblClickTime = 400;
 
+            int sysDbl = GetSystemMetrics(SM_CXDOUBLECLK);
+            double dblDistThresh = (sysDbl > 0 && sysDbl * 2 > 16) ? (double)(sysDbl * 2) : 16.0;
+
             BOOL isDbl = FALSE;
             if (g_actionCount > 0) {
                 SynthAction* lastAct = &g_actions[g_actionCount - 1];
                 if (lastAct->actionType == TTP_ACTION_CLICK) {
                     double clickDist = ttp_calc_euclidean_dist(lastAct->origX, lastAct->origY, g_lDownX, g_lDownY);
-                    if (clickDist <= 6.0 && (timestamp >= lastAct->timestamp) && (timestamp - lastAct->timestamp <= dblClickTime)) {
+                    if (clickDist <= dblDistThresh && (timestamp >= lastAct->timestamp) && (timestamp - lastAct->timestamp <= dblClickTime)) {
                         /* Upgrade preceding click to DblClick */
                         lastAct->actionType = TTP_ACTION_DBLCLICK;
                         lastAct->timestamp = timestamp;
@@ -375,22 +381,29 @@ static LRESULT CALLBACK TimeoutDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     return DefWindowProcA(hwnd, uMsg, wParam, lParam);
 }
 
-int ttp_show_timeout_dialog(HWND hParent, const TTPStep* step) {
-    if (!step) return TTP_TIMEOUT_STOP;
-
-    static BOOL s_registered = FALSE;
-    HINSTANCE hInst = GetModuleHandleA(NULL);
-    if (!s_registered) {
-        WNDCLASSEXA wc = {0};
+void ttp_register_timeout_dialog_class(HINSTANCE hInst) {
+    if (!hInst) hInst = GetModuleHandleA(NULL);
+    WNDCLASSEXA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    if (!GetClassInfoExA(hInst, "TTPTimeoutDialog", &wc)) {
+        memset(&wc, 0, sizeof(wc));
         wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = TimeoutDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = "TTPTimeoutDialog";
         RegisterClassExA(&wc);
-        s_registered = TRUE;
     }
+}
+
+int ttp_show_timeout_dialog(HWND hParent, const TTPStep* step) {
+    if (!step) return TTP_TIMEOUT_STOP;
+
+    HINSTANCE hInst = GetModuleHandleA(NULL);
+    ttp_register_timeout_dialog_class(hInst);
 
     int posX = 100, posY = 100;
     if (hParent && IsWindow(hParent)) {
@@ -491,6 +504,12 @@ static int handle_timeout_choice(const TTPStep* step, HWND hParent) {
     if (g_timeoutCallback) {
         return g_timeoutCallback(step, g_timeoutUserData);
     }
+    int presetAction = TTP_GET_TIMEOUT_ACTION(step->targetMode);
+    if (presetAction == TTP_TIMEOUT_ACT_RETRY) return TTP_TIMEOUT_RETRY;
+    if (presetAction == TTP_TIMEOUT_ACT_USE_RECORDED) return TTP_TIMEOUT_USE_RECORDED;
+    if (presetAction == TTP_TIMEOUT_ACT_SKIP) return TTP_TIMEOUT_SKIP;
+    if (presetAction == TTP_TIMEOUT_ACT_STOP) return TTP_TIMEOUT_STOP;
+
     return ttp_show_timeout_dialog(hParent, step);
 }
 
@@ -500,17 +519,28 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
     LONG targetX = step->origX;
     LONG targetY = step->origY;
     BOOL targetFound = FALSE;
+    DWORD baseMode = TTP_GET_BASE_TARGET_MODE(step->targetMode);
 
-    if (step->targetMode == TTP_TARGET_COORD || step->targetMode == 0) {
+    if (baseMode == TTP_TARGET_COORD || baseMode == 0) {
         targetX = step->origX;
         targetY = step->origY;
         targetFound = TRUE;
-    } else if (step->targetMode == TTP_TARGET_TEXT) {
+    } else if (baseMode == TTP_TARGET_TEXT) {
         DWORD startTick = GetTickCount();
         DWORD timeout = (step->timeoutMs > 0) ? step->timeoutMs : 3000;
 
         while (!targetFound) {
             if (step->textKey[0] != '\0') {
+                /* Fast check: does accessible object at orig pos match? */
+                char accName[128] = {0};
+                POINT origPt = { step->origX, step->origY };
+                if (ttp_get_accessible_name_at_point(origPt, accName, sizeof(accName)) && strstr(accName, step->textKey)) {
+                    targetX = step->origX;
+                    targetY = step->origY;
+                    targetFound = TRUE;
+                    break;
+                }
+
                 POINT candidates[64];
                 int count = ttp_find_elements_by_text(step->textKey, candidates, 64);
                 if (count > 0) {
@@ -543,7 +573,7 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
             Sleep(50);
         }
-    } else if (step->targetMode == TTP_TARGET_IMAGE) {
+    } else if (baseMode == TTP_TARGET_IMAGE) {
         DWORD startTick = GetTickCount();
         DWORD timeout = (step->timeoutMs > 0) ? step->timeoutMs : 3000;
 
@@ -552,7 +582,7 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 HDC hdcScreen = GetDC(NULL);
                 int screenW = GetSystemMetrics(SM_CXSCREEN);
                 int screenH = GetSystemMetrics(SM_CYSCREEN);
-                POINT matchPos;
+                POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
                 BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.80, &matchPos, &score);
                 ReleaseDC(NULL, hdcScreen);
@@ -590,17 +620,26 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         targetFound = TRUE;
     }
 
+    int scrW = GetSystemMetrics(SM_CXSCREEN);
+    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    DWORD absX = (DWORD)((targetX * 65535) / (scrW > 1 ? scrW - 1 : 1));
+    DWORD absY = (DWORD)((targetY * 65535) / (scrH > 1 ? scrH - 1 : 1));
+
     /* Input event execution */
     switch (step->actionType) {
     case TTP_ACTION_CLICK:
         SetCursorPos(targetX, targetY);
+        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-        Sleep(10);
+        Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         break;
 
     case TTP_ACTION_DBLCLICK:
         SetCursorPos(targetX, targetY);
+        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         Sleep(50);
@@ -610,8 +649,10 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
     case TTP_ACTION_RCLICK:
         SetCursorPos(targetX, targetY);
+        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        Sleep(15);
         mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-        Sleep(10);
+        Sleep(15);
         mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
         break;
 

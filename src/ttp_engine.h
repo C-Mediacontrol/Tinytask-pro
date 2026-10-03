@@ -45,7 +45,8 @@ void ttp_engine_set_timeout_callback(TTPTimeoutCallback cb, void* userData);
 BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, HWND hParentForModal);
 
 /* Default native Win32 modal dialog for timeout prompt */
-int ttp_show_timeout_dialog(HWND hParent, const TTPStep* step);
+void ttp_register_timeout_dialog_class(HINSTANCE hInst);
+int  ttp_show_timeout_dialog(HWND hParent, const TTPStep* step);
 
 #ifdef __cplusplus
 }

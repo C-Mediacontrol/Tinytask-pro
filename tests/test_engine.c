@@ -306,6 +306,36 @@ static void test_playback_coord_mode(void) {
     printf("      => PASSED (TTP_TARGET_COORD executed directly without polling)\n");
 }
 
+/* -------------------------------------------------------------------------
+ * Test 9: Two consecutive clicks with human micro-jitter (< 16px) => 2 Clicks
+ * ------------------------------------------------------------------------- */
+static void test_synth_two_consecutive_clicks(void) {
+    printf("[TEST 9/9] Running test_synth_two_consecutive_clicks...\n");
+    ttp_synth_reset();
+
+    // Click 1 at (542, 474) with 10px jitter to (550, 478)
+    ttp_synth_add_mouse_event(WM_LBUTTONDOWN, 542, 474, 1000);
+    ttp_synth_add_mouse_event(WM_MOUSEMOVE, 550, 478, 1050);
+    ttp_synth_add_mouse_event(WM_LBUTTONUP, 550, 478, 1100);
+
+    // Click 2 at (740, 474) with 12px jitter to (748, 482)
+    ttp_synth_add_mouse_event(WM_LBUTTONDOWN, 740, 474, 2000);
+    ttp_synth_add_mouse_event(WM_MOUSEMOVE, 748, 482, 2050);
+    ttp_synth_add_mouse_event(WM_LBUTTONUP, 748, 482, 2100);
+
+    TTPStep steps[8];
+    memset(steps, 0, sizeof(steps));
+    DWORD count = ttp_synth_finalize(steps, 8);
+
+    assert(count == 2);
+    assert(steps[0].actionType == TTP_ACTION_CLICK);
+    assert(steps[0].origX == 542 && steps[0].origY == 474);
+    assert(steps[1].actionType == TTP_ACTION_CLICK);
+    assert(steps[1].origX == 740 && steps[1].origY == 474);
+
+    printf("      => PASSED (2 consecutive clicks with micro-jitters recorded as CLICK, not DRAG)\n");
+}
+
 int main(void) {
     printf("==========================================\n");
     printf("Starting TinyTask Pro Engine Unit Tests\n");
@@ -321,6 +351,7 @@ int main(void) {
     test_playback_timeout_use_recorded();
     test_playback_timeout_skip_and_stop();
     test_playback_coord_mode();
+    test_synth_two_consecutive_clicks();
 
     printf("==========================================\n");
     printf("ALL ENGINE TESTS PASSED SUCCESSFULLY!\n");
