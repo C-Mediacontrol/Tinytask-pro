@@ -6,8 +6,8 @@
 - **Started**: 2026-10-04
 
 ## Task Status
-- [ ] Task 1: Core Data Models & `.ttp` Single-File Storage Module
-- [ ] Task 2: Pure-C Adaptive Vision & Spatial Disambiguation Engine
+- [x] Task 1: Core Data Models & `.ttp` Single-File Storage Module (commit 06bcdc6, verified tests pass)
+- [x] Task 2: Pure-C Adaptive Vision & Spatial Disambiguation Engine (commit fcdf8f8, verified all 4 test suites pass)
 - [ ] Task 3: Semantic Action Synthesizer & Recording Engine
 - [ ] Task 4: Collapsible Drawer UI, Step ListView & TinyTask Pro Shell
 - [ ] Task 5: End-to-End Build, Size Budget Gate (<800KB check), and Verification
