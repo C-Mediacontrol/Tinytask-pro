@@ -768,11 +768,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
  * ========================================================================= */
 
 #define TTP_SCREEN_GRAY_MAX (3840 * 2160)
-static BYTE s_screenGray[TTP_SCREEN_GRAY_MAX];
-
 #define TTP_TEMPLATE_PIXELS_MAX (512 * 512)
-static BYTE s_templateGray[TTP_TEMPLATE_PIXELS_MAX];
-static BYTE s_templateMask[TTP_TEMPLATE_PIXELS_MAX];
 
 typedef struct {
     int dx;
@@ -780,7 +776,21 @@ typedef struct {
     double t_norm; /* T_i - mu_T */
 } TTPMaskedPixel;
 
-static TTPMaskedPixel s_maskedPixels[TTP_TEMPLATE_PIXELS_MAX];
+typedef struct {
+    BYTE screenGray[TTP_SCREEN_GRAY_MAX];
+    BYTE templateGray[TTP_TEMPLATE_PIXELS_MAX];
+    BYTE templateMask[TTP_TEMPLATE_PIXELS_MAX];
+    TTPMaskedPixel maskedPixels[TTP_TEMPLATE_PIXELS_MAX];
+} TTPVisionBuffers;
+
+static TTPVisionBuffers* s_visBuf = NULL;
+static TTPVisionBuffers* get_vision_buffers(void) {
+    if (!s_visBuf) {
+        s_visBuf = (TTPVisionBuffers*)VirtualAlloc(NULL, sizeof(TTPVisionBuffers), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    return s_visBuf;
+}
+
 
 typedef struct {
     int dx;
@@ -967,9 +977,9 @@ static BOOL match_gray_buffer_masked_ncc(
     }
 
     int N = tw * th;
-    BYTE* tGray = s_templateGray;
-    BYTE* tMask = s_templateMask;
-    TTPMaskedPixel* mPixels = s_maskedPixels;
+    TTPVisionBuffers* vb = get_vision_buffers(); BYTE* tGray = vb ? vb->templateGray : NULL;
+    BYTE* tMask = vb ? vb->templateMask : NULL;
+    TTPMaskedPixel* mPixels = vb ? vb->maskedPixels : NULL;
     BOOL dynTemplate = FALSE;
 
     if (N > TTP_TEMPLATE_PIXELS_MAX) {
@@ -1287,7 +1297,7 @@ BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, cons
         }
     }
 
-    BYTE* scrGray = s_screenGray;
+    TTPVisionBuffers* vb = get_vision_buffers(); BYTE* scrGray = vb ? vb->screenGray : NULL;
     BOOL dynScreen = FALSE;
     if ((size_t)screenW * (size_t)screenH > TTP_SCREEN_GRAY_MAX) {
         scrGray = (BYTE*)malloc((size_t)screenW * (size_t)screenH);
@@ -1374,7 +1384,7 @@ BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int ro
         return FALSE;
     }
 
-    BYTE* scrGray = s_screenGray;
+    TTPVisionBuffers* vb = get_vision_buffers(); BYTE* scrGray = vb ? vb->screenGray : NULL;
     BOOL dynScreen = FALSE;
     if ((size_t)roiW * (size_t)roiH > TTP_SCREEN_GRAY_MAX) {
         scrGray = (BYTE*)malloc((size_t)roiW * (size_t)roiH);
