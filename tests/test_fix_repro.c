@@ -547,6 +547,66 @@ int main() {
     DeleteDC(hdcSim);
     ReleaseDC(NULL, hdcScrSim);
 
+    // =========================================================================
+    // Test 12: Minimized Window Rejection, Off-Screen Target Guard & Clean Crop
+    // =========================================================================
+    printf("\nTest 12: Minimized Window Rejection, Off-Screen Target Guard & Clean Crop\n");
+    fflush(stdout);
+
+    // 12A: Create a test window, minimize it (so rect is at -32000, -32000), and verify ttp_find_elements_by_text ignores it
+    WNDCLASSEXA wcMin = {0};
+    wcMin.cbSize = sizeof(wcMin);
+    wcMin.lpfnWndProc = DefWindowProcA;
+    wcMin.hInstance = GetModuleHandleA(NULL);
+    wcMin.lpszClassName = "TTP_TestMinimizedCls";
+    RegisterClassExA(&wcMin);
+
+    HWND hMinWnd = CreateWindowExA(0, "TTP_TestMinimizedCls", "TestMinimizedApp_XYZ123",
+                                   WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 200, 200, NULL, NULL, GetModuleHandleA(NULL), NULL);
+    assert(hMinWnd != NULL);
+    ShowWindow(hMinWnd, SW_MINIMIZE);
+    UpdateWindow(hMinWnd);
+
+    // Verify it is minimized (IsIconic == TRUE)
+    assert(IsIconic(hMinWnd) == TRUE);
+
+    POINT foundPts[10];
+    int foundCount = ttp_find_elements_by_text("TestMinimizedApp_XYZ123", foundPts, 10);
+    printf("Test 12A (Minimized Window Filter): foundCount=%d (expected 0)\n", foundCount);
+    fflush(stdout);
+    DestroyWindow(hMinWnd);
+    UnregisterClassA("TTP_TestMinimizedCls", GetModuleHandleA(NULL));
+    assert(foundCount == 0); // On unfixed code, this returns 1 with (-31920, -31986), FAILING RED!
+
+    // 12B: Off-Screen Coordinate Guard in ttp_playback_step
+    TTPStep stepOffscreen;
+    memset(&stepOffscreen, 0, sizeof(stepOffscreen));
+    stepOffscreen.stepId = 120;
+    stepOffscreen.actionType = TTP_ACTION_CLICK;
+    stepOffscreen.targetMode = TTP_TARGET_COORD;
+    stepOffscreen.origX = -32000;
+    stepOffscreen.origY = -32000;
+    BOOL offRes = ttp_playback_step(&stepOffscreen, NULL, 0, NULL);
+    printf("Test 12B (Off-screen Guard): offRes=%d (expected 0/FALSE)\n", offRes);
+    fflush(stdout);
+    assert(offRes == FALSE);
+
+    // 12C: Clean Rect Crop verification
+    HDC hdcScr12 = GetDC(NULL);
+    RECT testCropRc = { 100, 100, 150, 140 }; // 50x40
+    BYTE* cropBmp = NULL;
+    DWORD cropSz = 0;
+    BOOL cropRes = ttp_crop_rect_bmp(hdcScr12, &testCropRc, &cropBmp, &cropSz);
+    printf("Test 12C (Clean Crop): cropRes=%d, cropSz=%lu\n", cropRes, cropSz);
+    fflush(stdout);
+    assert(cropRes == TRUE);
+    assert(cropSz > 0 && cropBmp != NULL);
+    BITMAPINFOHEADER* bmih12 = (BITMAPINFOHEADER*)(cropBmp + sizeof(BITMAPFILEHEADER));
+    assert(bmih12->biWidth == 50);
+    assert(bmih12->biHeight == 40);
+    free(cropBmp);
+    ReleaseDC(NULL, hdcScr12);
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");

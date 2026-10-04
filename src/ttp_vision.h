@@ -34,7 +34,11 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
 
 /* UI Automation / Accessible text locator helpers */
 BOOL ttp_get_accessible_name_at_point(POINT pt, char* outName, int maxLen);
+BOOL ttp_get_accessible_element_at_point(POINT pt, char* outName, int maxLen, RECT* outRect);
 int  ttp_find_elements_by_text(const char* targetText, POINT* outCenters, int maxCount);
+
+/* Crops an explicit bounding rect into a 24bpp BMP */
+BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* outBmpSize);
 
 void ttp_free_bmp_buffer(BYTE* bmpBuffer);
 

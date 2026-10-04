@@ -1,0 +1,28 @@
+# Build artifacts
+*.o
+*.obj
+*.res
+
+# Test executables (keep release binaries in bin/)
+*.exe
+!bin/tinytask_pro.exe
+!bin/tinytask.exe
+
+# Editor & IDE files
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# Temporary & Log files
+*.log
+*.tmp
+*.temp
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS files
+Thumbs.db
+Desktop.ini

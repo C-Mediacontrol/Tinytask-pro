@@ -506,6 +506,22 @@ void ttp_engine_set_screen_dc_override(HDC hdcOverride) {
     s_hdcScreenOverride = hdcOverride;
 }
 
+void ttp_diag_log(const char* fmt, ...) {
+    FILE* fp = fopen("E:\\reverse-gemini\\Library\\logs\\tinytask_debug.log", "a");
+    if (!fp) fp = fopen("Library\\logs\\tinytask_debug.log", "a");
+    if (!fp) fp = fopen("tinytask_debug.log", "a");
+    if (!fp) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(fp, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
 static int handle_timeout_choice(const TTPStep* step, HWND hParent) {
     if (g_timeoutCallback) {
         return g_timeoutCallback(step, g_timeoutUserData);
@@ -527,10 +543,14 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
     BOOL targetFound = FALSE;
     DWORD baseMode = TTP_GET_BASE_TARGET_MODE(step->targetMode);
 
+    ttp_diag_log("[STEP_START] Step %lu: action=%lu, targetMode=%lu (base=%lu), orig=(%ld,%ld), text=\"%s\", bmpSize=%lu",
+        step->stepId, step->actionType, step->targetMode, baseMode, step->origX, step->origY, step->textKey, bmpSize);
+
     if (baseMode == TTP_TARGET_COORD || baseMode == 0) {
         targetX = step->origX;
         targetY = step->origY;
         targetFound = TRUE;
+        ttp_diag_log("  [COORD] Mode is COORD, using orig: (%ld, %ld)", targetX, targetY);
     } else if (baseMode == TTP_TARGET_TEXT) {
         DWORD startTick = GetTickCount();
         DWORD timeout = (step->timeoutMs > 0) ? step->timeoutMs : 3000;
@@ -540,21 +560,30 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 /* Fast check: does accessible object at orig pos match? */
                 char accName[128] = {0};
                 POINT origPt = { step->origX, step->origY };
-                if (ttp_get_accessible_name_at_point(origPt, accName, sizeof(accName)) && strstr(accName, step->textKey)) {
+                BOOL accHit = ttp_get_accessible_name_at_point(origPt, accName, sizeof(accName));
+                ttp_diag_log("  [TEXT] OrigPt (%ld, %ld) Accessible: \"%s\" (hit=%d)",
+                    origPt.x, origPt.y, accName, accHit);
+                if (accHit && strstr(accName, step->textKey)) {
                     targetX = step->origX;
                     targetY = step->origY;
                     targetFound = TRUE;
+                    ttp_diag_log("  [TEXT] Fast-check MATCHED at orig! target=(%ld, %ld)", targetX, targetY);
                     break;
                 }
 
                 POINT candidates[64];
                 int count = ttp_find_elements_by_text(step->textKey, candidates, 64);
+                ttp_diag_log("  [TEXT] find_elements_by_text(\"%s\"): count=%d", step->textKey, count);
+                for (int k = 0; k < count && k < 5; k++) {
+                    ttp_diag_log("    candidate[%d] = (%ld, %ld)", k, candidates[k].x, candidates[k].y);
+                }
                 if (count > 0) {
                     int best = ttp_pick_nearest_candidate(step->origX, step->origY, candidates, count);
                     if (best >= 0) {
                         targetX = candidates[best].x;
                         targetY = candidates[best].y;
                         targetFound = TRUE;
+                        ttp_diag_log("  [TEXT] Picked candidate %d: target=(%ld, %ld)", best, targetX, targetY);
                         break;
                     }
                 }
@@ -570,10 +599,14 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
                 BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
+                ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
+                    matched, score, matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
                     matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                    ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
+                        matched, score, matchPos.x, matchPos.y);
                 }
 
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
@@ -582,12 +615,16 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                     targetX = matchPos.x;
                     targetY = matchPos.y;
                     targetFound = TRUE;
+                    ttp_diag_log("  [VISUAL] Visual MATCHED! target=(%ld, %ld)", targetX, targetY);
                     break;
                 }
             }
 
             if (GetTickCount() - startTick >= timeout) {
+                ttp_diag_log("  [TIMEOUT] Expired (%lu ms)! Calling handle_timeout_choice...",
+                    GetTickCount() - startTick);
                 int choice = handle_timeout_choice(step, hParentForModal);
+                ttp_diag_log("  [TIMEOUT] choice returned: %d", choice);
                 if (choice == TTP_TIMEOUT_RETRY) {
                     startTick = GetTickCount();
                     continue;
@@ -595,10 +632,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                     targetX = step->origX;
                     targetY = step->origY;
                     targetFound = TRUE;
+                    ttp_diag_log("  [TIMEOUT] Using recorded pos: (%ld, %ld)", targetX, targetY);
                     break;
                 } else if (choice == TTP_TIMEOUT_SKIP) {
+                    ttp_diag_log("  [TIMEOUT] Skipping step %lu", step->stepId);
                     return TRUE;
                 } else {
+                    ttp_diag_log("  [TIMEOUT] Stopping macro playback");
                     return FALSE;
                 }
             }
@@ -619,10 +659,14 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
                 BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
+                ttp_diag_log("  [IMAGE] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
+                    matched, score, matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
                     matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                    ttp_diag_log("  [IMAGE] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
+                        matched, score, matchPos.x, matchPos.y);
                 }
 
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
@@ -631,12 +675,16 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                     targetX = matchPos.x;
                     targetY = matchPos.y;
                     targetFound = TRUE;
+                    ttp_diag_log("  [IMAGE] Image MATCHED! target=(%ld, %ld)", targetX, targetY);
                     break;
                 }
             }
 
             if (GetTickCount() - startTick >= timeout) {
+                ttp_diag_log("  [TIMEOUT] Expired (%lu ms)! Calling handle_timeout_choice...",
+                    GetTickCount() - startTick);
                 int choice = handle_timeout_choice(step, hParentForModal);
+                ttp_diag_log("  [TIMEOUT] choice returned: %d", choice);
                 if (choice == TTP_TIMEOUT_RETRY) {
                     startTick = GetTickCount();
                     continue;
@@ -644,10 +692,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                     targetX = step->origX;
                     targetY = step->origY;
                     targetFound = TRUE;
+                    ttp_diag_log("  [TIMEOUT] Using recorded pos: (%ld, %ld)", targetX, targetY);
                     break;
                 } else if (choice == TTP_TIMEOUT_SKIP) {
+                    ttp_diag_log("  [TIMEOUT] Skipping step %lu", step->stepId);
                     return TRUE;
                 } else {
+                    ttp_diag_log("  [TIMEOUT] Stopping macro playback");
                     return FALSE;
                 }
             }
@@ -662,8 +713,19 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
     int scrW = GetSystemMetrics(SM_CXSCREEN);
     int scrH = GetSystemMetrics(SM_CYSCREEN);
+
+    /* Strict screen bounds guard: reject off-screen coordinates to prevent wrapping/clamping to (0,0) */
+    if (targetX < 0 || targetY < 0 || targetX >= scrW || targetY >= scrH) {
+        ttp_diag_log("  [GUARD] Target coordinate (%ld, %ld) is off-screen (screen: %dx%d)! Aborting injection.",
+            targetX, targetY, scrW, scrH);
+        return FALSE;
+    }
+
     DWORD absX = (DWORD)((targetX * 65535) / (scrW > 1 ? scrW - 1 : 1));
     DWORD absY = (DWORD)((targetY * 65535) / (scrH > 1 ? scrH - 1 : 1));
+
+    ttp_diag_log("  [INJECT] action=%lu, target=(%ld, %ld), abs=(%lu, %lu)",
+        step->actionType, targetX, targetY, absX, absY);
 
     /* Input event execution: mouse_event dispatched first, SetCursorPos hard-locks physical pixel (matching tinytask.c) */
     switch (step->actionType) {
@@ -772,6 +834,9 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
     default:
         break;
     }
+
+    ttp_diag_log("  [INJECT_DONE] Step %lu finished, sleeping postDelayMs=%lu",
+        step->stepId, step->postDelayMs);
 
     if (step->postDelayMs > 0) {
         Sleep(step->postDelayMs);

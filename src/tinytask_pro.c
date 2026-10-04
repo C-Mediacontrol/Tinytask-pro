@@ -1289,17 +1289,27 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
     if (lDown && !prevLDown) {
         ttp_synth_add_mouse_event(WM_LBUTTONDOWN, pt.x, pt.y, now);
 
+        char accName[128] = {0};
+        RECT accRect = {0};
+        BOOL hasAcc = ttp_get_accessible_element_at_point(pt, accName, sizeof(accName), &accRect);
+
         BYTE* bmpBuf = NULL;
         DWORD bmpSize = 0;
         RECT buttonRect = {0};
         HDC hdcScreen = GetDC(NULL);
-        if (ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &buttonRect, &bmpBuf, &bmpSize)) {
-            // Adaptive crop acquired
+
+        /* Clean Element Crop Priority:
+         * If MSAA gives a compact bounding box (e.g. desktop icon, toolbar button, dialog control),
+         * crop directly to that clean bounding rectangle to avoid capturing unrelated background wallpaper/decorations! */
+        int accW = accRect.right - accRect.left;
+        int accH = accRect.bottom - accRect.top;
+        if (hasAcc && accW >= 16 && accH >= 14 && accW <= 240 && accH <= 105) {
+            ttp_crop_rect_bmp(hdcScreen, &accRect, &bmpBuf, &bmpSize);
+        }
+        if (!bmpBuf) {
+            ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &buttonRect, &bmpBuf, &bmpSize);
         }
         ReleaseDC(NULL, hdcScreen);
-
-        char accName[128] = {0};
-        ttp_get_accessible_name_at_point(pt, accName, sizeof(accName));
 
         /* Power Automate Dual-Locator Rule:
          * If accName merely matches the root parent window title (e.g. "Calculator", "Untitled - Notepad"),

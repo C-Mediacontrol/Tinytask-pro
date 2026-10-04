@@ -133,20 +133,21 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         return FALSE;
     }
 
-    /* 2. Compute 3x3 Sobel gradients */
-    int* gradX = (int*)calloc(ROI_SIZE * ROI_SIZE, sizeof(int));
-    int* gradY = (int*)calloc(ROI_SIZE * ROI_SIZE, sizeof(int));
+    /* 2. Compute 3x3 Sobel gradients and binary edge map */
+    int cx = HALF_ROI;
+    int cy = HALF_ROI;
+
     int* gradM = (int*)calloc(ROI_SIZE * ROI_SIZE, sizeof(int));
-    if (!gradX || !gradY || !gradM) {
-        if (gradX) free(gradX);
-        if (gradY) free(gradY);
-        if (gradM) free(gradM);
+    if (!gradM) {
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
         DeleteDC(hdcMem);
         if (releaseDC) ReleaseDC(NULL, hdc);
         return FALSE;
     }
+
+    double localGradSum = 0.0;
+    int localGradCount = 0;
 
     for (int y = 1; y < ROI_SIZE - 1; y++) {
         for (int x = 1; x < ROI_SIZE - 1; x++) {
@@ -155,145 +156,242 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
                      - gray[y+1][x-1] + gray[y+1][x+1];
             int gy = -gray[y-1][x-1] - 2 * gray[y-1][x] - gray[y-1][x+1]
                      + gray[y+1][x-1] + 2 * gray[y+1][x] + gray[y+1][x+1];
-            int idx = y * ROI_SIZE + x;
-            gradX[idx] = abs(gx);
-            gradY[idx] = abs(gy);
-            gradM[idx] = abs(gx) + abs(gy);
+            int m = abs(gx) + abs(gy);
+            gradM[y * ROI_SIZE + x] = m;
+            if (x >= cx - 35 && x <= cx + 35 && y >= cy - 20 && y <= cy + 20) {
+                localGradSum += m;
+                localGradCount++;
+            }
         }
     }
 
-    /* 3. Detect edges around center (cx, cy) = (128, 128) */
-    int cx = HALF_ROI;
-    int cy = HALF_ROI;
+    int edgeThresh = 30;
+    if (localGradCount > 0) {
+        int avgLocal = (int)(localGradSum / localGradCount);
+        edgeThresh = avgLocal / 2;
+        if (edgeThresh < 20) edgeThresh = 20;
+        if (edgeThresh > 70) edgeThresh = 70;
+    }
 
-    /* Scan up and down to find horizontal button borders (top and bottom) */
-    int bestTop = cy - 20;
-    int maxTopGrad = -1;
-    for (int y = cy - 4; y >= cy - 65 && y >= 2; y--) {
-        int sum = 0;
-        for (int x = cx - 12; x <= cx + 12; x++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradY[idx] * 2 + gradM[idx];
-        }
-        if (sum > maxTopGrad) {
-            maxTopGrad = sum;
-            bestTop = y;
+    BYTE edge[256][256];
+    memset(edge, 0, sizeof(edge));
+    for (int y = 1; y < ROI_SIZE - 1; y++) {
+        for (int x = 1; x < ROI_SIZE - 1; x++) {
+            if (gradM[y * ROI_SIZE + x] >= edgeThresh) {
+                edge[y][x] = 1;
+            }
         }
     }
 
-    int bestBottom = cy + 20;
-    int maxBottomGrad = -1;
-    for (int y = cy + 4; y <= cy + 65 && y < ROI_SIZE - 2; y++) {
-        int sum = 0;
-        for (int x = cx - 12; x <= cx + 12; x++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradY[idx] * 2 + gradM[idx];
-        }
-        if (sum > maxBottomGrad) {
-            maxBottomGrad = sum;
-            bestBottom = y;
+    /* 3. UIED Morphological Closing:
+     * Dilation (3x3 max filter) followed by Erosion (3x3 min filter).
+     * Connects discrete character strokes and fragmented button borders. */
+    BYTE dilated[256][256];
+    memset(dilated, 0, sizeof(dilated));
+    for (int y = 1; y < ROI_SIZE - 1; y++) {
+        for (int x = 1; x < ROI_SIZE - 1; x++) {
+            BYTE v = 0;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (edge[y + dy][x + dx]) { v = 1; break; }
+                }
+                if (v) break;
+            }
+            dilated[y][x] = v;
         }
     }
 
-    /* Scan left and right using detected vertical span [bestTop, bestBottom] */
-    int spanTop = (bestTop < bestBottom) ? bestTop : bestBottom;
-    int spanBottom = (bestTop < bestBottom) ? bestBottom : bestTop;
+    BYTE closed[256][256];
+    memset(closed, 0, sizeof(closed));
+    for (int y = 2; y < ROI_SIZE - 2; y++) {
+        for (int x = 2; x < ROI_SIZE - 2; x++) {
+            BYTE v = 1;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (!dilated[y + dy][x + dx]) { v = 0; break; }
+                }
+                if (!v) break;
+            }
+            closed[y][x] = v;
+        }
+    }
 
-    int bestLeft = cx - 40;
-    int maxLeftGrad = -1;
-    for (int x = cx - 6; x >= cx - 115 && x >= 2; x--) {
-        int sum = 0;
+    /* 4. Click-Seeded Enclosing Barrier Scanning:
+     * Scan outwards in 4 directions from center (cx, cy).
+     * Distinguishes inner text/icon glyphs (distance < 12-18px) from true enclosing button borders.
+     * Stops at the true outer button barrier, preventing bleed into adjacent stacked buttons! */
+    int bestTop = cy - 15;
+    int firstTop = -1;
+    int outerTop = -1;
+    int gapTopRows = 0;
+
+    for (int y = cy - 3; y >= cy - 50 && y >= 4; y--) {
+        int edgeCount = 0;
+        int gradSum = 0;
+        for (int x = cx - 25; x <= cx + 25; x++) {
+            if (closed[y][x]) edgeCount++;
+            gradSum += gradM[y * ROI_SIZE + x];
+        }
+        if (edgeCount >= 8 || gradSum >= 600) {
+            if (firstTop == -1) {
+                firstTop = y;
+                if (cy - y >= 14) {
+                    break; /* Already outer button border */
+                }
+            } else if (gapTopRows >= 3) {
+                outerTop = y;
+                break;
+            }
+        } else {
+            if (firstTop != -1) {
+                gapTopRows++;
+            }
+        }
+    }
+    if (outerTop != -1) bestTop = outerTop;
+    else if (firstTop != -1) bestTop = firstTop;
+
+    int bestBottom = cy + 15;
+    int firstBottom = -1;
+    int outerBottom = -1;
+    int gapBottomRows = 0;
+
+    for (int y = cy + 3; y <= cy + 50 && y < ROI_SIZE - 4; y++) {
+        int edgeCount = 0;
+        int gradSum = 0;
+        for (int x = cx - 25; x <= cx + 25; x++) {
+            if (closed[y][x]) edgeCount++;
+            gradSum += gradM[y * ROI_SIZE + x];
+        }
+        if (edgeCount >= 8 || gradSum >= 600) {
+            if (firstBottom == -1) {
+                firstBottom = y;
+                if (y - cy >= 14) {
+                    break; /* Already outer button border */
+                }
+            } else if (gapBottomRows >= 3) {
+                outerBottom = y;
+                break;
+            }
+        } else {
+            if (firstBottom != -1) {
+                gapBottomRows++;
+            }
+        }
+    }
+    if (outerBottom != -1) bestBottom = outerBottom;
+    else if (firstBottom != -1) bestBottom = firstBottom;
+
+    int spanTop = min(bestTop, bestBottom);
+    int spanBottom = max(bestTop, bestBottom);
+    if (spanBottom - spanTop < 16) {
+        spanTop = cy - 8;
+        spanBottom = cy + 8;
+    }
+
+    int bestLeft = cx - 30;
+    int firstLeft = -1;
+    int outerLeft = -1;
+    int gapLeftCols = 0;
+
+    for (int x = cx - 3; x >= cx - 90 && x >= 4; x--) {
+        int edgeCount = 0;
+        int gradSum = 0;
         for (int y = spanTop; y <= spanBottom; y++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradX[idx] * 2 + gradM[idx];
+            if (closed[y][x]) edgeCount++;
+            gradSum += gradM[y * ROI_SIZE + x];
         }
-        if (sum > maxLeftGrad) {
-            maxLeftGrad = sum;
-            bestLeft = x;
+        int h = spanBottom - spanTop + 1;
+        if (edgeCount >= max(4, h / 3) || gradSum >= h * 40) {
+            if (firstLeft == -1) {
+                firstLeft = x;
+                if (cx - x >= 18) {
+                    break; /* Already outer button border */
+                }
+            } else if (gapLeftCols >= 3) {
+                outerLeft = x;
+                break;
+            }
+        } else {
+            if (firstLeft != -1) {
+                gapLeftCols++;
+            }
         }
     }
+    if (outerLeft != -1) bestLeft = outerLeft;
+    else if (firstLeft != -1) bestLeft = firstLeft;
 
-    int bestRight = cx + 40;
-    int maxRightGrad = -1;
-    for (int x = cx + 6; x <= cx + 115 && x < ROI_SIZE - 2; x++) {
-        int sum = 0;
+    int bestRight = cx + 30;
+    int firstRight = -1;
+    int outerRight = -1;
+    int gapRightCols = 0;
+
+    for (int x = cx + 3; x <= cx + 90 && x < ROI_SIZE - 4; x++) {
+        int edgeCount = 0;
+        int gradSum = 0;
         for (int y = spanTop; y <= spanBottom; y++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradX[idx] * 2 + gradM[idx];
+            if (closed[y][x]) edgeCount++;
+            gradSum += gradM[y * ROI_SIZE + x];
         }
-        if (sum > maxRightGrad) {
-            maxRightGrad = sum;
-            bestRight = x;
-        }
-    }
-
-    /* Refine top and bottom using detected horizontal span [bestLeft, bestRight] */
-    int spanLeft = (bestLeft < bestRight) ? bestLeft : bestRight;
-    int spanRight = (bestLeft < bestRight) ? bestRight : bestLeft;
-
-    for (int y = cy - 4; y >= cy - 65 && y >= 2; y--) {
-        int sum = 0;
-        for (int x = spanLeft; x <= spanRight; x++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradY[idx] * 2 + gradM[idx];
-        }
-        if (sum > maxTopGrad) {
-            maxTopGrad = sum;
-            bestTop = y;
+        int h = spanBottom - spanTop + 1;
+        if (edgeCount >= max(4, h / 3) || gradSum >= h * 40) {
+            if (firstRight == -1) {
+                firstRight = x;
+                if (x - cx >= 18) {
+                    break; /* Already outer button border */
+                }
+            } else if (gapRightCols >= 3) {
+                outerRight = x;
+                break;
+            }
+        } else {
+            if (firstRight != -1) {
+                gapRightCols++;
+            }
         }
     }
+    if (outerRight != -1) bestRight = outerRight;
+    else if (firstRight != -1) bestRight = firstRight;
 
-    for (int y = cy + 4; y <= cy + 65 && y < ROI_SIZE - 2; y++) {
-        int sum = 0;
-        for (int x = spanLeft; x <= spanRight; x++) {
-            int idx = y * ROI_SIZE + x;
-            sum += gradY[idx] * 2 + gradM[idx];
-        }
-        if (sum > maxBottomGrad) {
-            maxBottomGrad = sum;
-            bestBottom = y;
-        }
-    }
-
-    /* Free gradient tables */
-    free(gradX);
-    free(gradY);
     free(gradM);
-
-    /* Fallback if flat surface */
-    if (maxTopGrad < 50 && maxBottomGrad < 50 && maxLeftGrad < 50 && maxRightGrad < 50) {
-        bestLeft = cx - 40;
-        bestRight = cx + 40;
-        bestTop = cy - 15;
-        bestBottom = cy + 15;
-    }
 
     int L = (bestLeft < bestRight) ? bestLeft : bestRight;
     int R = (bestLeft < bestRight) ? bestRight : bestLeft;
     int T = (bestTop < bestBottom) ? bestTop : bestBottom;
     int B = (bestTop < bestBottom) ? bestBottom : bestTop;
 
-    /* Clamp dimensions: width in [20, 220], height in [15, 90] */
+    /* Clamp dimensions: width in [20, 180], height in [16, 56] */
     int width = R - L;
     if (width < 20) {
         int mid = (L + R) / 2;
         L = mid - 10;
         R = mid + 10;
-    } else if (width > 220) {
+    } else if (width > 180) {
         int mid = (L + R) / 2;
-        L = mid - 110;
-        R = mid + 110;
+        L = mid - 90;
+        R = mid + 90;
     }
 
     int height = B - T;
-    if (height < 15) {
+    if (height < 16) {
         int mid = (T + B) / 2;
-        T = mid - 7;
+        T = mid - 8;
         B = mid + 8;
-    } else if (height > 90) {
+    } else if (height > 56) {
         int mid = (T + B) / 2;
-        T = mid - 45;
-        B = mid + 45;
+        T = mid - 28;
+        B = mid + 28;
+    }
+
+    /* Prevent extreme aspect ratio (e.g. tall narrow sliver like 22x90) */
+    width = R - L;
+    height = B - T;
+    if (height > width * 1.5) {
+        int allowedH = (int)(width * 1.5);
+        if (allowedH < 16) allowedH = 16;
+        int mid = (T + B) / 2;
+        T = mid - allowedH / 2;
+        B = mid + allowedH / 2;
     }
 
     /* Clamp to ROI boundaries [0, 256] */
@@ -351,6 +449,115 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         for (int x = 0; x < cropW; x++) {
             int srcX = L + x;
             const BYTE* px = srcPix + (srcY * ROI_SIZE + srcX) * 4;
+            dstRow[x * 3 + 0] = px[0]; /* B */
+            dstRow[x * 3 + 1] = px[1]; /* G */
+            dstRow[x * 3 + 2] = px[2]; /* R */
+        }
+    }
+
+    *outBmp = bmpBuf;
+    *outBmpSize = totalBmpSize;
+
+    SelectObject(hdcMem, hOld);
+    DeleteObject(hBmp);
+    DeleteDC(hdcMem);
+    if (releaseDC) ReleaseDC(NULL, hdc);
+
+    return TRUE;
+}
+
+BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* outBmpSize) {
+    if (!cropRect || !outBmp || !outBmpSize) return FALSE;
+    *outBmp = NULL;
+    *outBmpSize = 0;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    int L = cropRect->left;
+    int T = cropRect->top;
+    int R = cropRect->right;
+    int B = cropRect->bottom;
+
+    if (L < 0) L = 0;
+    if (T < 0) T = 0;
+    if (R > screenW) R = screenW;
+    if (B > screenH) B = screenH;
+
+    int cropW = R - L;
+    int cropH = B - T;
+    if (cropW < 8 || cropH < 8) return FALSE;
+
+    HDC hdc = hdcSrc;
+    BOOL releaseDC = FALSE;
+    if (!hdc) {
+        hdc = GetDC(NULL);
+        releaseDC = TRUE;
+        if (!hdc) return FALSE;
+    }
+
+    HDC hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem) {
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = cropW;
+    bi.bmiHeader.biHeight = -cropH; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = NULL;
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hBmp || !pBits) {
+        DeleteDC(hdcMem);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+
+    HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
+    BitBlt(hdcMem, 0, 0, cropW, cropH, hdc, L, T, SRCCOPY);
+    GdiFlush();
+
+    int rowStride = ((cropW * 3 + 3) / 4) * 4;
+    DWORD imgSize = (DWORD)rowStride * cropH;
+    DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
+
+    BYTE* bmpBuf = (BYTE*)malloc(totalBmpSize);
+    if (!bmpBuf) {
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+    memset(bmpBuf, 0, totalBmpSize);
+
+    BITMAPFILEHEADER* bmfh = (BITMAPFILEHEADER*)bmpBuf;
+    bmfh->bfType = 0x4D42; /* 'BM' */
+    bmfh->bfSize = totalBmpSize;
+    bmfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+    BITMAPINFOHEADER* bmih = (BITMAPINFOHEADER*)(bmpBuf + sizeof(BITMAPFILEHEADER));
+    bmih->biSize = sizeof(BITMAPINFOHEADER);
+    bmih->biWidth = cropW;
+    bmih->biHeight = cropH; /* Standard bottom-up */
+    bmih->biPlanes = 1;
+    bmih->biBitCount = 24;
+    bmih->biCompression = BI_RGB;
+    bmih->biSizeImage = imgSize;
+
+    const BYTE* srcPix = (const BYTE*)pBits;
+    BYTE* dstData = bmpBuf + bmfh->bfOffBits;
+    for (int y = 0; y < cropH; y++) {
+        int srcY = cropH - 1 - y; /* invert for bottom-up BMP */
+        BYTE* dstRow = dstData + y * rowStride;
+        for (int x = 0; x < cropW; x++) {
+            const BYTE* px = srcPix + (srcY * cropW + x) * 4;
             dstRow[x * 3 + 0] = px[0]; /* B */
             dstRow[x * 3 + 1] = px[1]; /* G */
             dstRow[x * 3 + 2] = px[2]; /* R */
@@ -926,29 +1133,48 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
     return FALSE;
 }
 
-BOOL ttp_get_accessible_name_at_point(POINT pt, char* outName, int maxLen) {
-    if (!outName || maxLen <= 0) return FALSE;
-    outName[0] = '\0';
+BOOL ttp_get_accessible_element_at_point(POINT pt, char* outName, int maxLen, RECT* outRect) {
+    if (outName && maxLen > 0) outName[0] = '\0';
+    if (outRect) memset(outRect, 0, sizeof(RECT));
 
     CoInitialize(NULL);
     IAccessible* pAcc = NULL;
     VARIANT varChild;
     VariantInit(&varChild);
 
+    BOOL found = FALSE;
     HRESULT hr = AccessibleObjectFromPoint(pt, &pAcc, &varChild);
     if (SUCCEEDED(hr) && pAcc) {
-        BSTR bstrName = NULL;
-        pAcc->lpVtbl->get_accName(pAcc, varChild, &bstrName);
-        if (bstrName) {
-            WideCharToMultiByte(CP_ACP, 0, bstrName, -1, outName, maxLen - 1, NULL, NULL);
-            outName[maxLen - 1] = '\0';
-            SysFreeString(bstrName);
+        if (outName && maxLen > 0) {
+            BSTR bstrName = NULL;
+            pAcc->lpVtbl->get_accName(pAcc, varChild, &bstrName);
+            if (bstrName) {
+                WideCharToMultiByte(CP_ACP, 0, bstrName, -1, outName, maxLen - 1, NULL, NULL);
+                outName[maxLen - 1] = '\0';
+                SysFreeString(bstrName);
+            }
         }
+        if (outRect) {
+            long x = 0, y = 0, w = 0, h = 0;
+            if (SUCCEEDED(pAcc->lpVtbl->accLocation(pAcc, &x, &y, &w, &h, varChild))) {
+                if (w > 0 && h > 0) {
+                    outRect->left = (LONG)x;
+                    outRect->top = (LONG)y;
+                    outRect->right = (LONG)(x + w);
+                    outRect->bottom = (LONG)(y + h);
+                }
+            }
+        }
+        found = (outName && outName[0] != '\0') || (outRect && (outRect->right > outRect->left));
         VariantClear(&varChild);
         pAcc->lpVtbl->Release(pAcc);
     }
     CoUninitialize();
-    return (outName[0] != '\0');
+    return found;
+}
+
+BOOL ttp_get_accessible_name_at_point(POINT pt, char* outName, int maxLen) {
+    return ttp_get_accessible_element_at_point(pt, outName, maxLen, NULL);
 }
 
 /* =========================================================================
@@ -977,6 +1203,23 @@ static BOOL text_matches(const char* haystack, const char* needle) {
 
 static BOOL check_and_add_window(HWND hwnd, TextSearchContext* ctx) {
     if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) return TRUE;
+    if (IsIconic(hwnd)) return TRUE; /* Minimized window (-32000, -32000) must be ignored! */
+
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc)) return TRUE;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    /* Reject off-screen, minimized, or degenerate rects */
+    if (rc.left < -1000 || rc.top < -1000 || rc.right <= 0 || rc.bottom <= 0 ||
+        rc.left >= screenW || rc.top >= screenH ||
+        rc.right - rc.left <= 2 || rc.bottom - rc.top <= 2) {
+        return TRUE;
+    }
+
+    POINT pt = { (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
+    if (pt.x < 0 || pt.y < 0 || pt.x >= screenW || pt.y >= screenH) return TRUE;
 
     char buf[512] = {0};
     if (GetWindowTextA(hwnd, buf, sizeof(buf)) <= 0) {
@@ -984,24 +1227,81 @@ static BOOL check_and_add_window(HWND hwnd, TextSearchContext* ctx) {
     }
 
     if (buf[0] != '\0' && text_matches(buf, ctx->targetText)) {
-        RECT rc;
-        if (GetWindowRect(hwnd, &rc)) {
-            if (rc.right > rc.left && rc.bottom > rc.top) {
-                POINT pt = { (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
-                BOOL dup = FALSE;
-                for (int i = 0; i < ctx->count; i++) {
-                    if (ctx->outCenters[i].x == pt.x && ctx->outCenters[i].y == pt.y) {
-                        dup = TRUE;
-                        break;
-                    }
-                }
-                if (!dup && ctx->count < ctx->maxCount) {
-                    ctx->outCenters[ctx->count++] = pt;
-                }
+        BOOL dup = FALSE;
+        for (int i = 0; i < ctx->count; i++) {
+            if (ctx->outCenters[i].x == pt.x && ctx->outCenters[i].y == pt.y) {
+                dup = TRUE;
+                break;
             }
+        }
+        if (!dup && ctx->count < ctx->maxCount) {
+            ctx->outCenters[ctx->count++] = pt;
         }
     }
     return (ctx->count < ctx->maxCount);
+}
+
+static void check_desktop_icons_accessible(const char* targetText, TextSearchContext* ctx) {
+    if (!targetText || targetText[0] == '\0') return;
+
+    HWND hProgman = FindWindowA("Progman", NULL);
+    HWND hDefView = NULL;
+    if (hProgman) {
+        hDefView = FindWindowExA(hProgman, NULL, "SHELLDLL_DefView", NULL);
+    }
+    if (!hDefView) {
+        HWND hWorkerW = NULL;
+        while ((hWorkerW = FindWindowExA(NULL, hWorkerW, "WorkerW", NULL)) != NULL) {
+            hDefView = FindWindowExA(hWorkerW, NULL, "SHELLDLL_DefView", NULL);
+            if (hDefView) break;
+        }
+    }
+    if (!hDefView) return;
+    HWND hLV = FindWindowExA(hDefView, NULL, "SysListView32", NULL);
+    if (!hLV) return;
+
+    CoInitialize(NULL);
+    IAccessible* pAcc = NULL;
+    if (SUCCEEDED(AccessibleObjectFromWindow(hLV, OBJID_CLIENT, &IID_IAccessible, (void**)&pAcc)) && pAcc) {
+        long childCount = 0;
+        if (SUCCEEDED(pAcc->lpVtbl->get_accChildCount(pAcc, &childCount)) && childCount > 0) {
+            VARIANT* pChildren = (VARIANT*)malloc(sizeof(VARIANT) * childCount);
+            if (pChildren) {
+                long obtained = 0;
+                if (SUCCEEDED(AccessibleChildren(pAcc, 0, childCount, pChildren, &obtained))) {
+                    int screenW = GetSystemMetrics(SM_CXSCREEN);
+                    int screenH = GetSystemMetrics(SM_CYSCREEN);
+                    for (long i = 0; i < obtained && ctx->count < ctx->maxCount; i++) {
+                        BSTR bstrName = NULL;
+                        if (SUCCEEDED(pAcc->lpVtbl->get_accName(pAcc, pChildren[i], &bstrName)) && bstrName) {
+                            char name[256] = {0};
+                            WideCharToMultiByte(CP_ACP, 0, bstrName, -1, name, sizeof(name) - 1, NULL, NULL);
+                            SysFreeString(bstrName);
+                            if (text_matches(name, targetText)) {
+                                long x = 0, y = 0, w = 0, h = 0;
+                                if (SUCCEEDED(pAcc->lpVtbl->accLocation(pAcc, &x, &y, &w, &h, pChildren[i]))) {
+                                    POINT pt = { (LONG)(x + w / 2), (LONG)(y + h / 2) };
+                                    if (pt.x >= 0 && pt.y >= 0 && pt.x < screenW && pt.y < screenH) {
+                                        BOOL dup = FALSE;
+                                        for (int k = 0; k < ctx->count; k++) {
+                                            if (ctx->outCenters[k].x == pt.x && ctx->outCenters[k].y == pt.y) {
+                                                dup = TRUE; break;
+                                            }
+                                        }
+                                        if (!dup) ctx->outCenters[ctx->count++] = pt;
+                                    }
+                                }
+                            }
+                        }
+                        VariantClear(&pChildren[i]);
+                    }
+                }
+                free(pChildren);
+            }
+        }
+        pAcc->lpVtbl->Release(pAcc);
+    }
+    CoUninitialize();
 }
 
 static BOOL CALLBACK EnumChildProc(HWND hwnd, LPARAM lParam) {
@@ -1029,16 +1329,21 @@ int ttp_find_elements_by_text(const char* targetText, POINT* outCenters, int max
     ctx.maxCount = maxCount;
     ctx.count = 0;
 
-    /* 1. Check foreground window and its descendants first */
-    HWND hFore = GetForegroundWindow();
-    if (hFore && IsWindow(hFore)) {
-        check_and_add_window(hFore, &ctx);
-        if (ctx.count < ctx.maxCount) {
-            EnumChildWindows(hFore, EnumChildProc, (LPARAM)&ctx);
+    /* 1. Check desktop icons via MSAA first (supports moved desktop shortcuts) */
+    check_desktop_icons_accessible(targetText, &ctx);
+
+    /* 2. Check foreground window and its descendants */
+    if (ctx.count < ctx.maxCount) {
+        HWND hFore = GetForegroundWindow();
+        if (hFore && IsWindow(hFore)) {
+            check_and_add_window(hFore, &ctx);
+            if (ctx.count < ctx.maxCount) {
+                EnumChildWindows(hFore, EnumChildProc, (LPARAM)&ctx);
+            }
         }
     }
 
-    /* 2. Check all top-level desktop windows */
+    /* 3. Check all top-level desktop windows */
     if (ctx.count < ctx.maxCount) {
         EnumWindows(EnumWindowsProc, (LPARAM)&ctx);
     }

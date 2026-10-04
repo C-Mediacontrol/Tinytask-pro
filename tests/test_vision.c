@@ -271,8 +271,103 @@ static void test_adaptive_edge_detection(void) {
     printf("      Adaptive Edge Detection tests passed!\n");
 }
 
+static void test_stacked_adjacent_buttons_uied(void) {
+    printf("[4/5] Running test_stacked_adjacent_buttons_uied (Dense Stacked Buttons)...\n");
+
+    /* Create synthetic 500x500 canvas */
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcCanvas = CreateCompatibleDC(hdcScreen);
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = 500;
+    bi.bmiHeader.biHeight = -500; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = NULL;
+    HBITMAP hBmp = CreateDIBSection(hdcCanvas, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HGDIOBJ hOld = SelectObject(hdcCanvas, hBmp);
+
+    /* Light background */
+    RECT bgRect = { 0, 0, 500, 500 };
+    HBRUSH hBgBrush = CreateSolidBrush(RGB(240, 240, 240));
+    FillRect(hdcCanvas, &bgRect, hBgBrush);
+    DeleteObject(hBgBrush);
+
+    /* 3 Adjacent Buttons separated by only 2px gap:
+     * Btn A: [100, 200, 160, 240]
+     * Btn B: [162, 200, 222, 240] (Target)
+     * Btn C: [224, 200, 284, 240] */
+    RECT rA = { 100, 200, 160, 240 };
+    RECT rB = { 162, 200, 222, 240 };
+    RECT rC = { 224, 200, 284, 240 };
+
+    HBRUSH hBtnBrush = CreateSolidBrush(RGB(50, 120, 200));
+    HBRUSH hBorderBrush = CreateSolidBrush(RGB(20, 20, 20));
+
+    FillRect(hdcCanvas, &rA, hBtnBrush);
+    FrameRect(hdcCanvas, &rA, hBorderBrush);
+    FillRect(hdcCanvas, &rB, hBtnBrush);
+    FrameRect(hdcCanvas, &rB, hBorderBrush);
+    FillRect(hdcCanvas, &rC, hBtnBrush);
+    FrameRect(hdcCanvas, &rC, hBorderBrush);
+
+    DeleteObject(hBtnBrush);
+    DeleteObject(hBorderBrush);
+
+    /* Unique inner glyphs for each button to simulate different button texts */
+    HBRUSH hGlyphBrush = CreateSolidBrush(RGB(255, 255, 255));
+    RECT gA = { 125, 215, 135, 225 };
+    RECT gB = { 185, 215, 199, 225 };
+    RECT gC = { 245, 215, 255, 225 };
+    FillRect(hdcCanvas, &gA, hGlyphBrush);
+    FillRect(hdcCanvas, &gB, hGlyphBrush);
+    FillRect(hdcCanvas, &gC, hGlyphBrush);
+    DeleteObject(hGlyphBrush);
+    GdiFlush();
+
+    /* Click inside middle Button B at (192, 220) */
+    RECT outRect;
+    memset(&outRect, 0, sizeof(outRect));
+    BYTE* outBmp = NULL;
+    DWORD outBmpSize = 0;
+
+    BOOL success = ttp_adaptive_crop_button(hdcCanvas, 192, 220, &outRect, &outBmp, &outBmpSize);
+    assert(success == TRUE);
+    assert(outBmp != NULL);
+    assert(outBmpSize > 54);
+
+    printf("      Middle Button Detected Rect: [%ld, %ld, %ld, %ld], size %ldx%ld\n",
+           outRect.left, outRect.top, outRect.right, outRect.bottom,
+           outRect.right - outRect.left, outRect.bottom - outRect.top);
+    fflush(stdout);
+
+    /* Critical Boundary Verification:
+     * 1. Must bound Button B accurately (+- 3px)
+     * 2. Must NEVER bleed into adjacent Button A (outRect.left >= 160)
+     * 3. Must NEVER bleed into adjacent Button C (outRect.right <= 224) */
+    assert(abs(outRect.left - 162) <= 3);
+    assert(abs(outRect.right - 222) <= 3);
+    assert(abs(outRect.top - 200) <= 3);
+    assert(abs(outRect.bottom - 240) <= 3);
+
+    assert(outRect.left >= 160);
+    assert(outRect.right <= 224);
+
+    ttp_free_bmp_buffer(outBmp);
+    SelectObject(hdcCanvas, hOld);
+    DeleteObject(hBmp);
+    DeleteDC(hdcCanvas);
+    ReleaseDC(NULL, hdcScreen);
+
+    printf("      Dense Stacked Buttons UIED boundary isolation tests passed!\n");
+}
+
 static void test_find_elements_by_text(void) {
-    printf("[4/4] Running test_find_elements_by_text...\n");
+    printf("[5/5] Running test_find_elements_by_text...\n");
 
     /* Create temporary test window with unique text */
     const char* uniqueText = "TTP_Unique_Button_Test";
@@ -306,6 +401,7 @@ int main(void) {
     test_distance_and_nearest();
     test_ncc_template_matching();
     test_adaptive_edge_detection();
+    test_stacked_adjacent_buttons_uied();
     test_find_elements_by_text();
 
     printf("=========================================\n");

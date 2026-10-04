@@ -49,6 +49,9 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 void ttp_register_timeout_dialog_class(HINSTANCE hInst);
 int  ttp_show_timeout_dialog(HWND hParent, const TTPStep* step);
 
+/* Diagnostic logger */
+void ttp_diag_log(const char* fmt, ...);
+
 #ifdef __cplusplus
 }
 #endif
