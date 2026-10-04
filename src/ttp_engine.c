@@ -564,11 +564,26 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 ttp_diag_log("  [TEXT] OrigPt (%ld, %ld) Accessible: \"%s\" (hit=%d)",
                     origPt.x, origPt.y, accName, accHit);
                 if (accHit && strstr(accName, step->textKey)) {
-                    targetX = step->origX;
-                    targetY = step->origY;
-                    targetFound = TRUE;
-                    ttp_diag_log("  [TEXT] Fast-check MATCHED at orig! target=(%ld, %ld)", targetX, targetY);
-                    break;
+                    BOOL verified = TRUE;
+                    if (bmpData && bmpSize > 0) {
+                        HDC hdcScr = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+                        POINT roiPt = origPt;
+                        double roiScore = 0.0;
+                        BOOL roiOk = ttp_match_template_ncc_roi(hdcScr, origPt.x, origPt.y, 80, bmpData, bmpSize, 0.60, &roiPt, &roiScore);
+                        if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScr);
+                        ttp_diag_log("  [TEXT_FAST_CHECK_VALIDATE] OrigPt (%ld, %ld): roiOk=%d, score=%.4f",
+                            origPt.x, origPt.y, roiOk, roiScore);
+                        if (!roiOk) {
+                            verified = FALSE;
+                        }
+                    }
+                    if (verified) {
+                        targetX = step->origX;
+                        targetY = step->origY;
+                        targetFound = TRUE;
+                        ttp_diag_log("  [TEXT] Fast-check MATCHED at orig! target=(%ld, %ld)", targetX, targetY);
+                        break;
+                    }
                 }
 
                 POINT candidates[64];

@@ -1076,15 +1076,15 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
             double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
                          - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
             double varI = sumI2 - (sumI * sumI) / N;
-            if (varI <= 1e-4) continue;
+            if (varI <= 25.0) continue;
             double denomI = sqrt(varI);
             double num = 0.0;
-            for (int v = 0; v < th; v += 2) {
+            for (int v = 0; v < th; v++) {
                 const double* pS = &S[(y + v) * roiW + x];
                 const double* pnT = &nT[v * tw];
-                for (int u = 0; u < tw; u += 2) num += pnT[u] * pS[u];
+                for (int u = 0; u < tw; u++) num += pnT[u] * pS[u];
             }
-            double score = (num * 4.0) / denomI;
+            double score = num / denomI;
             if (score > bestScore) {
                 bestScore = score;
                 bestX = x; bestY = y;
@@ -1104,7 +1104,7 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
                 double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
                              - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
                 double varI = sumI2 - (sumI * sumI) / N;
-                if (varI <= 1e-4) continue;
+                if (varI <= 25.0) continue;
                 double denomI = sqrt(varI);
                 double num = 0.0;
                 for (int v = 0; v < th; v++) {
