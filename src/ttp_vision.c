@@ -41,6 +41,145 @@ void ttp_free_bmp_buffer(BYTE* bmpBuffer) {
 }
 
 /* =========================================================================
+ * 1.5 Automatic Border Chromakey Flood-Fill & Safety Fallback
+ * ========================================================================= */
+
+BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, BYTE tol, BYTE* outMask) {
+    if (!rgbPixels || !outMask || w <= 0 || h <= 0) {
+        return FALSE;
+    }
+    if (bytesPerPixel != 3 && bytesPerPixel != 4) {
+        return FALSE;
+    }
+    if (tol == 0) {
+        tol = 25;
+    }
+
+    int totalPixels = w * h;
+    /* Initialize mask to all 1s (foreground) */
+    memset(outMask, 1, (size_t)totalPixels);
+
+    /* 1. Sample 4-border pixels to compute base background color */
+    int borderCount = 0;
+    double sumB = 0.0, sumG = 0.0, sumR = 0.0;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                const BYTE* p = rgbPixels + (y * w + x) * bytesPerPixel;
+                sumB += p[0];
+                sumG += p[1];
+                sumR += p[2];
+                borderCount++;
+            }
+        }
+    }
+
+    if (borderCount == 0) {
+        return FALSE;
+    }
+
+    double avgB = sumB / (double)borderCount;
+    double avgG = sumG / (double)borderCount;
+    double avgR = sumR / (double)borderCount;
+    int baseB = (int)(avgB + 0.5);
+    int baseG = (int)(avgG + 0.5);
+    int baseR = (int)(avgR + 0.5);
+
+    /* 2. Compute border color variance / dispersion sigmaB */
+    double varSum = 0.0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                const BYTE* p = rgbPixels + (y * w + x) * bytesPerPixel;
+                int db = (int)p[0] - baseB;
+                int dg = (int)p[1] - baseG;
+                int dr = (int)p[2] - baseR;
+                varSum += (double)(dr * dr + dg * dg + db * db);
+            }
+        }
+    }
+
+    double sigmaB = sqrt(varSum / (double)borderCount);
+    if (sigmaB > 60.0) {
+        /* Safety fallback: border variance too high, revert mask to all 1s */
+        return TRUE;
+    }
+
+    /* 3. BFS 4-neighbor flood fill starting from border pixels matching base color within tol */
+    int* queue = (int*)malloc((size_t)totalPixels * sizeof(int));
+    if (!queue) {
+        return FALSE;
+    }
+
+    int head = 0;
+    int tail = 0;
+    int tolSq = (int)tol * (int)tol;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                int idx = y * w + x;
+                const BYTE* p = rgbPixels + idx * bytesPerPixel;
+                int db = (int)p[0] - baseB;
+                int dg = (int)p[1] - baseG;
+                int dr = (int)p[2] - baseR;
+                int distSq = dr * dr + dg * dg + db * db;
+                if (distSq <= tolSq) {
+                    outMask[idx] = 0; /* Mark as transparent background */
+                    queue[tail++] = idx;
+                }
+            }
+        }
+    }
+
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+
+    while (head < tail) {
+        int curr = queue[head++];
+        int cx = curr % w;
+        int cy = curr / w;
+
+        for (int dir = 0; dir < 4; dir++) {
+            int nx = cx + dx[dir];
+            int ny = cy + dy[dir];
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                int nidx = ny * w + nx;
+                if (outMask[nidx] == 1) {
+                    const BYTE* np = rgbPixels + nidx * bytesPerPixel;
+                    int db = (int)np[0] - baseB;
+                    int dg = (int)np[1] - baseG;
+                    int dr = (int)np[2] - baseR;
+                    int distSq = dr * dr + dg * dg + db * db;
+                    if (distSq <= tolSq) {
+                        outMask[nidx] = 0;
+                        queue[tail++] = nidx;
+                    }
+                }
+            }
+        }
+    }
+
+    free(queue);
+
+    /* 4. Safety fallback: if foreground ratio < 15%, revert mask to all 1s */
+    int fgCount = 0;
+    for (int i = 0; i < totalPixels; i++) {
+        if (outMask[i] == 1) {
+            fgCount++;
+        }
+    }
+
+    double fgRatio = (double)fgCount / (double)totalPixels;
+    if (fgRatio < 0.15) {
+        memset(outMask, 1, (size_t)totalPixels);
+    }
+
+    return TRUE;
+}
+
+/* =========================================================================
  * 2. Adaptive Edge Detection & Button Cropping
  * ========================================================================= */
 
@@ -412,8 +551,8 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     outRect->right = roiLeft + R;
     outRect->bottom = roiTop + B;
 
-    /* Format standard 24bpp uncompressed BMP */
-    int rowStride = ((cropW * 3 + 3) / 4) * 4;
+    /* Format standard 32bpp uncompressed BMP */
+    int rowStride = cropW * 4;
     DWORD imgSize = (DWORD)rowStride * cropH;
     DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
 
@@ -437,7 +576,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     bmih->biWidth = cropW;
     bmih->biHeight = cropH; /* Standard bottom-up */
     bmih->biPlanes = 1;
-    bmih->biBitCount = 24;
+    bmih->biBitCount = 32;
     bmih->biCompression = BI_RGB;
     bmih->biSizeImage = imgSize;
 
@@ -449,10 +588,21 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         for (int x = 0; x < cropW; x++) {
             int srcX = L + x;
             const BYTE* px = srcPix + (srcY * ROI_SIZE + srcX) * 4;
-            dstRow[x * 3 + 0] = px[0]; /* B */
-            dstRow[x * 3 + 1] = px[1]; /* G */
-            dstRow[x * 3 + 2] = px[2]; /* R */
+            dstRow[x * 4 + 0] = px[0]; /* B */
+            dstRow[x * 4 + 1] = px[1]; /* G */
+            dstRow[x * 4 + 2] = px[2]; /* R */
+            dstRow[x * 4 + 3] = 255;   /* Foreground default */
         }
+    }
+
+    BYTE* mask = (BYTE*)malloc((size_t)cropW * cropH);
+    if (mask) {
+        if (ttp_chromakey_mask(dstData, cropW, cropH, 4, 25, mask)) {
+            for (int i = 0; i < cropW * cropH; i++) {
+                dstData[i * 4 + 3] = mask[i] ? 255 : 0;
+            }
+        }
+        free(mask);
     }
 
     *outBmp = bmpBuf;

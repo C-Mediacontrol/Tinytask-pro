@@ -19,9 +19,18 @@ int ttp_pick_nearest_candidate(LONG origX, LONG origY, const POINT* candidates, 
  * Computes 3x3 Sobel gradients (horizontal & vertical).
  * Scans outwards in 4 directions to detect prominent contrast boundaries (button edges).
  * Fills outRect with bounding box (clamped between 20x15 and 220x90).
- * Allocates and returns a standard 24bpp uncompressed BMP memory buffer in *outBmp, size in *outBmpSize.
+ * Allocates and returns a standard 32bpp uncompressed BMP memory buffer in *outBmp, size in *outBmpSize.
  */
 BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRect, BYTE** outBmp, DWORD* outBmpSize);
+
+/* Computes a binary foreground mask (1=foreground, 0=transparent background) using
+ * 4-neighbor BFS border color flood-fill with safety fallback.
+ * rgbPixels: 24bpp BGR or 32bpp BGRA image buffer.
+ * bytesPerPixel: 3 or 4.
+ * tol: color distance tolerance (Euclidean or Manhattan; if 0, defaults to 25).
+ * outMask: allocated buffer of w * h bytes.
+ * Returns TRUE on success. */
+BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, BYTE tol, BYTE* outMask);
 
 /* Pure-C Normalized Cross-Correlation (NCC) template matcher:
  * Uses Power Automate hierarchical coarse-to-fine pyramid search (<25ms).

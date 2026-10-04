@@ -1,13 +1,15 @@
 # Subagent-Driven Development Progress Ledger
 
-- **Plan**: `reverse-gemini/.docs/plans/2026-10-04-timeout-action-and-cascaded-matching.md`
-- **Spec**: `reverse-gemini/.docs/specs/2026-10-04-timeout-action-and-cascaded-matching-design.md`
-- **Model**: `inherit`
+- **Plan**: `reverse-gemini/.docs/plans/2026-10-05-masked-chromakey-and-extreme-shrink.md`
+- **Spec**: `reverse-gemini/.docs/specs/2026-10-05-masked-chromakey-vision-and-extreme-shrink-design.md`
+- **Model**: `inherit` (approved by user)
 - **Agent**: `code-dev`
-- **Started**: 2026-10-04
+- **Started**: 2026-10-05
 
 ## Task Status
-- [x] Task 1: Hierarchical Cascaded Vision Matching (`ttp_engine.c`) (commit 644f589, verified 4.02ms Tier-1 ROI + Tier-2 fallback)
-- [x] Task 2: Drawer ListView 6-Column Layout & Timeout Policy Popup Menu (`tinytask_pro.c`) (commit bcf2030, verified 6 columns, popup menu, 82.5KB binary)
-- [x] Task 3: Comprehensive Bilingual Documentation (`reverse-gemini/README.md`) (commit 4a0111f, verified Chinese Part 1 + English Part 2)
-
+- [x] Task 1: 32bpp BGRA 资产存储与向下兼容协议 (commit d664f94, 7/7 tests passed)
+- [x] Task 2: 自动边缘色差连通泛洪算法与防误抠安全回退 (4/4 chromakey tests passed, 32bpp BGRA crop)
+- [ ] Task 3: 阶段二极致瘦身：调色板位图转换与彻底切断 CRT 浮点库
+- [ ] Task 4: 极速零堆内存与掩码分层搜图引擎 (Masked Cascaded Engine)
+- [ ] Task 5: 原生 Win32 步骤微调弹窗与 60FPS 灰白棋盘格实时预览
+- [ ] Task 6: 终极 50~60 KB 体积门禁、全量回归验证与 README 文档更新

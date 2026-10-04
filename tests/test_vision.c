@@ -259,7 +259,7 @@ static void test_adaptive_edge_detection(void) {
     assert(bmfh->bfType == 0x4D42);
     assert(bmih->biWidth == (outRect.right - outRect.left));
     assert(bmih->biHeight == (outRect.bottom - outRect.top));
-    assert(bmih->biBitCount == 24);
+    assert(bmih->biBitCount == 32);
 
     ttp_free_bmp_buffer(outBmp);
 
@@ -369,12 +369,20 @@ static void test_stacked_adjacent_buttons_uied(void) {
 static void test_find_elements_by_text(void) {
     printf("[5/5] Running test_find_elements_by_text...\n");
 
-    /* Create temporary test window with unique text */
+    /* Create temporary test parent window and child control with unique text */
     const char* uniqueText = "TTP_Unique_Button_Test";
+    HWND hwndParent = CreateWindowA("STATIC", "TestParent",
+                                    WS_POPUP | WS_VISIBLE,
+                                    100, 100, 300, 200,
+                                    NULL, NULL, NULL, NULL);
+    assert(hwndParent != NULL);
+    ShowWindow(hwndParent, SW_SHOW);
+    UpdateWindow(hwndParent);
+
     HWND hwndBtn = CreateWindowA("STATIC", uniqueText,
-                                 WS_POPUP | WS_VISIBLE,
-                                 120, 140, 160, 40,
-                                 NULL, NULL, NULL, NULL);
+                                 WS_CHILD | WS_VISIBLE,
+                                 20, 40, 160, 40,
+                                 hwndParent, NULL, NULL, NULL);
     assert(hwndBtn != NULL);
     ShowWindow(hwndBtn, SW_SHOW);
     UpdateWindow(hwndBtn);
@@ -385,11 +393,12 @@ static void test_find_elements_by_text(void) {
 
     printf("      Found %d element(s) matching '%s'\n", count, uniqueText);
     assert(count >= 1);
-    /* Window rect center should be 120 + 160/2 = 200, 140 + 40/2 = 160 */
+    /* Window rect center should be (100 + 20) + 160/2 = 200, (100 + 40) + 40/2 = 160 */
     assert(abs(centers[0].x - 200) <= 5);
     assert(abs(centers[0].y - 160) <= 5);
 
     DestroyWindow(hwndBtn);
+    DestroyWindow(hwndParent);
     printf("      Find Elements By Text tests passed!\n");
 }
 
