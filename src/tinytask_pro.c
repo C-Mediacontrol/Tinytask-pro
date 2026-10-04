@@ -66,6 +66,7 @@
 #define ID_OPT_DEFAULT_TIMEOUT  0x9234
 #define ID_OPT_WEBSITE          0x9235
 #define ID_OPT_ABOUT            0x9236
+#define ID_OPT_COMPILE_EXE      0x9237
 
 /* Speed mode constants matching TinyTask engine */
 #define SPEED_HALF   0
@@ -119,6 +120,8 @@ static HWND g_hInPlaceEdit = NULL;
 static int  g_InPlaceEditItem = -1;
 static WNDPROC g_OldEditProc = NULL;
 static HFONT g_hGuiFont = NULL;
+static HWND  g_hToolTip = NULL;
+static BOOL  g_IsStandalonePayload = FALSE;
 
 /* Toolbar Resources */
 static HBITMAP g_hBmpToolbar = NULL;
@@ -1528,6 +1531,146 @@ static void CALLBACK HotkeyTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWO
 }
 
 /* =========================================================================
+ * 10.5 Standalone EXE Compilation & Self-Execution
+ * ========================================================================= */
+
+#pragma pack(push, 1)
+typedef struct {
+    char  magic[8];        /* "TTP_EXE\0" */
+    DWORD payloadSize;     /* Size of appended .ttp project blob */
+    DWORD originalExeSize; /* File offset where payload begins */
+} TTPEndTrailer;
+#pragma pack(pop)
+
+static void CompileToExe(HWND hwnd, const char* outPath) {
+    if (g_stepCount == 0) {
+        MessageBoxA(hwnd, "Nothing Recorded\nPlease record steps or open a project before compiling.", "TinyTask Pro", MB_ICONINFORMATION);
+        return;
+    }
+
+    char myPath[MAX_PATH];
+    GetModuleFileNameA(NULL, myPath, MAX_PATH);
+
+    if (!CopyFileA(myPath, outPath, FALSE)) {
+        MessageBoxA(hwnd, "Failed to create executable file.", "TinyTask Pro", MB_ICONERROR);
+        return;
+    }
+
+    HANDLE hFile = CreateFileA(outPath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxA(hwnd, "Unable to write payload to target file.", "TinyTask Pro", MB_ICONERROR);
+        return;
+    }
+
+    DWORD origSize = GetFileSize(hFile, NULL);
+
+    /* If target already has an embedded trailer, strip it */
+    if (origSize > sizeof(TTPEndTrailer)) {
+        SetFilePointer(hFile, origSize - sizeof(TTPEndTrailer), NULL, FILE_BEGIN);
+        TTPEndTrailer oldTrailer;
+        DWORD readBytes = 0;
+        ReadFile(hFile, &oldTrailer, sizeof(oldTrailer), &readBytes, NULL);
+        if (readBytes == sizeof(oldTrailer) && memcmp(oldTrailer.magic, "TTP_EXE\0", 8) == 0) {
+            origSize = oldTrailer.originalExeSize;
+            SetFilePointer(hFile, origSize, NULL, FILE_BEGIN);
+            SetEndOfFile(hFile);
+        }
+    }
+
+    char tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    char tempTtp[MAX_PATH];
+    GetTempFileNameA(tempPath, "ttp", 0, tempTtp);
+
+    if (!ttp_save_project(tempTtp, g_steps, g_stepCount, (const BYTE**)g_bmpBuffers, g_bmpSizes)) {
+        CloseHandle(hFile);
+        DeleteFileA(outPath);
+        DeleteFileA(tempTtp);
+        MessageBoxA(hwnd, "Failed to serialize project payload.", "TinyTask Pro", MB_ICONERROR);
+        return;
+    }
+
+    HANDLE hTemp = CreateFileA(tempTtp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hTemp != INVALID_HANDLE_VALUE) {
+        DWORD ttpSize = GetFileSize(hTemp, NULL);
+        BYTE* tempBuf = (BYTE*)malloc(ttpSize);
+        if (tempBuf) {
+            DWORD readBytes = 0;
+            ReadFile(hTemp, tempBuf, ttpSize, &readBytes, NULL);
+            SetFilePointer(hFile, origSize, NULL, FILE_BEGIN);
+            DWORD written = 0;
+            WriteFile(hFile, tempBuf, ttpSize, &written, NULL);
+            free(tempBuf);
+
+            TTPEndTrailer trailer;
+            memcpy(trailer.magic, "TTP_EXE\0", 8);
+            trailer.payloadSize = ttpSize;
+            trailer.originalExeSize = origSize;
+            WriteFile(hFile, &trailer, sizeof(trailer), &written, NULL);
+        }
+        CloseHandle(hTemp);
+    }
+    DeleteFileA(tempTtp);
+    CloseHandle(hFile);
+
+    char msg[300];
+    snprintf(msg, sizeof(msg), "Compile successful!\n\nStandalone executable created:\n\"%s\"\n(%lu steps with embedded vision assets)", outPath, (unsigned long)g_stepCount);
+    MessageBoxA(hwnd, msg, "TinyTask Pro", MB_ICONINFORMATION);
+}
+
+static void CheckSelfOverlay(HWND hwnd) {
+    (void)hwnd;
+    char myPath[MAX_PATH];
+    GetModuleFileNameA(NULL, myPath, MAX_PATH);
+
+    HANDLE hFile = CreateFileA(myPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    DWORD fSize = GetFileSize(hFile, NULL);
+    if (fSize > sizeof(TTPEndTrailer)) {
+        SetFilePointer(hFile, fSize - sizeof(TTPEndTrailer), NULL, FILE_BEGIN);
+        TTPEndTrailer trailer;
+        DWORD readBytes = 0;
+        ReadFile(hFile, &trailer, sizeof(trailer), &readBytes, NULL);
+
+        if (readBytes == sizeof(trailer) && memcmp(trailer.magic, "TTP_EXE\0", 8) == 0 &&
+            trailer.originalExeSize + trailer.payloadSize + sizeof(TTPEndTrailer) == fSize) {
+            SetFilePointer(hFile, trailer.originalExeSize, NULL, FILE_BEGIN);
+            BYTE* pPayload = (BYTE*)malloc(trailer.payloadSize);
+            if (pPayload) {
+                ReadFile(hFile, pPayload, trailer.payloadSize, &readBytes, NULL);
+                CloseHandle(hFile);
+                hFile = INVALID_HANDLE_VALUE;
+
+                char tempPath[MAX_PATH];
+                GetTempPathA(MAX_PATH, tempPath);
+                char tempTtp[MAX_PATH];
+                GetTempFileNameA(tempPath, "ttp", 0, tempTtp);
+
+                FILE* fp = fopen(tempTtp, "wb");
+                if (fp) {
+                    fwrite(pPayload, 1, trailer.payloadSize, fp);
+                    fclose(fp);
+                    free(pPayload);
+
+                    if (LoadProjectFile(tempTtp)) {
+                        g_IsStandalonePayload = TRUE;
+                        RefreshListView();
+                        UpdateTitle();
+                        StartPlayback();
+                    }
+                    DeleteFileA(tempTtp);
+                } else {
+                    free(pPayload);
+                }
+                return;
+            }
+        }
+    }
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+}
+
+/* =========================================================================
  * 11. Options Menu (Full Preferences Matching TinyTask + Pro Extensions)
  * ========================================================================= */
 
@@ -1599,6 +1742,7 @@ static void ShowOptionsMenu(HWND hwnd, int x, int y) {
     AppendMenuA(hMenu, MF_STRING, ID_OPT_DEFAULT_TIMEOUT, timeoutMenuStr);
 
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMenu, MF_STRING, ID_OPT_COMPILE_EXE, "&Compile to Standalone EXE...");
     AppendMenuA(hMenu, MF_STRING, ID_OPT_WEBSITE, "TinyTask &Website");
     AppendMenuA(hMenu, MF_STRING, ID_OPT_ABOUT, "&About TinyTask Pro...");
 
@@ -1663,6 +1807,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         SetTimer(hwnd, TIMER_HOTKEY, 25, HotkeyTimerProc);
         UpdateTitle();
+
+        /* Win32 Native Tooltips for Toolbar Buttons */
+        g_hToolTip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
+            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            hwnd, NULL, g_hInstance, NULL);
+        if (g_hToolTip) {
+            SetWindowPos(g_hToolTip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            const char* btnTooltips[NUM_BUTTONS] = {
+                "Open (.ttp, .rec)",
+                "Save (.ttp)",
+                "Record Macro (Ctrl+Shift+Alt+R)",
+                "Play Macro (Ctrl+Shift+Alt+P)",
+                "Steps (Toggle Workflow Drawer)",
+                "Options & Preferences"
+            };
+            int drawH = BUTTON_HEIGHT - g_HideCaptionsOffset;
+            for (int i = 0; i < NUM_BUTTONS; i++) {
+                TOOLINFOA ti;
+                memset(&ti, 0, sizeof(ti));
+                ti.cbSize = sizeof(TOOLINFOA);
+                ti.uFlags = TTF_SUBCLASS;
+                ti.hwnd = hwnd;
+                ti.uId = (UINT_PTR)(100 + i);
+                ti.rect.left = TOOLBAR_PADDING + i * (BUTTON_WIDTH + TOOLBAR_PADDING);
+                ti.rect.top = TOOLBAR_PADDING;
+                ti.rect.right = ti.rect.left + BUTTON_WIDTH;
+                ti.rect.bottom = ti.rect.top + drawH;
+                ti.lpszText = (LPSTR)btnTooltips[i];
+                SendMessageA(g_hToolTip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+            }
+        }
+
+        CheckSelfOverlay(hwnd);
         return 0;
     }
 
@@ -1990,6 +2168,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (toSec >= 1 && toSec <= 60) {
                 g_DefaultTimeoutSec = toSec;
                 SaveConfig();
+            }
+            break;
+        }
+
+        case ID_OPT_COMPILE_EXE: {
+            if (g_stepCount == 0) {
+                MessageBoxA(hwnd, "Nothing Recorded\nPlease record steps or open a project before compiling.", "TinyTask Pro", MB_ICONINFORMATION);
+                break;
+            }
+            char path[MAX_PATH] = "macro.exe";
+            OPENFILENAMEA ofn = {0};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = "Application Files (*.exe)\0*.exe\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = path;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_OVERWRITEPROMPT;
+            if (GetSaveFileNameA(&ofn)) {
+                CompileToExe(hwnd, path);
             }
             break;
         }
