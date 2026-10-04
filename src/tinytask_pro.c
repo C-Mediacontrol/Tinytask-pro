@@ -184,6 +184,8 @@ static void RefreshListView(void);
 static void UpdateTitle(void);
 static void SetDrawerState(BOOL expanded);
 static void CommitInPlaceEdit(BOOL save);
+static void StartInPlaceTimeoutEdit(int item);
+static void ShowTimeoutPolicyMenu(HWND hwnd, int item);
 static void StartPlayback(void);
 static void StopPlayback(void);
 static void StartRecording(void);
@@ -400,16 +402,25 @@ static void GetTargetDescription(const TTPStep* step, char* buf, size_t bufSize)
     snprintf(buf, bufSize, "(%ld,%ld)", step->origX, step->origY);
 }
 
+static void FormatTimeoutSecondsString(const TTPStep* step, char* buf, size_t bufSize) {
+    double sec = (double)step->timeoutMs / 1000.0;
+    snprintf(buf, bufSize, "%.1fs", sec);
+}
+
+static void FormatTimeoutPolicyString(const TTPStep* step, char* buf, size_t bufSize) {
+    int act = TTP_GET_TIMEOUT_ACTION(step->targetMode);
+    if (act == TTP_TIMEOUT_ACT_RETRY) snprintf(buf, bufSize, "[Retry]");
+    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) snprintf(buf, bufSize, "[Coord]");
+    else if (act == TTP_TIMEOUT_ACT_SKIP) snprintf(buf, bufSize, "[Skip]");
+    else if (act == TTP_TIMEOUT_ACT_STOP) snprintf(buf, bufSize, "[Stop]");
+    else snprintf(buf, bufSize, "[Prompt]");
+}
+
 static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) {
     double sec = (double)step->timeoutMs / 1000.0;
-    int act = TTP_GET_TIMEOUT_ACTION(step->targetMode);
-    const char* tag = "";
-    if (act == TTP_TIMEOUT_ACT_RETRY) tag = " [Retry]";
-    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) tag = " [Coord]";
-    else if (act == TTP_TIMEOUT_ACT_SKIP) tag = " [Skip]";
-    else if (act == TTP_TIMEOUT_ACT_STOP) tag = " [Stop]";
-    else tag = " [Prompt]";
-    snprintf(buf, bufSize, "%.1fs%s", sec, tag);
+    char pol[32];
+    FormatTimeoutPolicyString(step, pol, sizeof(pol));
+    snprintf(buf, bufSize, "%.1fs %s", sec, pol);
 }
 
 static void ParseTimeoutString(const char* str, DWORD* outTimeoutMs, int* outAction) {
@@ -992,6 +1003,22 @@ static void CreateToolbarBitmaps(void) {
  * 6. ListView & In-Place Editing
  * ========================================================================= */
 
+typedef struct {
+    const char* header;
+    int width;
+} DrawerColumnDef;
+
+#define DRAWER_COLUMN_COUNT 6
+
+static const DrawerColumnDef g_drawerColumns[DRAWER_COLUMN_COUNT] = {
+    { "#", 28 },
+    { "Action", 52 },
+    { "Target", 95 },
+    { "Timeout", 50 },
+    { "On Timeout", 75 },
+    { "Asset", 40 }
+};
+
 static void RefreshListView(void) {
     if (!g_hListView) return;
     SendMessageA(g_hListView, WM_SETREDRAW, FALSE, 0);
@@ -1017,9 +1044,13 @@ static void RefreshListView(void) {
         GetTargetDescription(&g_steps[i], targetDesc, sizeof(targetDesc));
         ListView_SetItemText(g_hListView, i, 2, targetDesc);
 
-        char timeoutStr[64];
-        FormatTimeoutString(&g_steps[i], timeoutStr, sizeof(timeoutStr));
-        ListView_SetItemText(g_hListView, i, 3, timeoutStr);
+        char timeoutSecStr[32];
+        FormatTimeoutSecondsString(&g_steps[i], timeoutSecStr, sizeof(timeoutSecStr));
+        ListView_SetItemText(g_hListView, i, 3, timeoutSecStr);
+
+        char timeoutPolicyStr[32];
+        FormatTimeoutPolicyString(&g_steps[i], timeoutPolicyStr, sizeof(timeoutPolicyStr));
+        ListView_SetItemText(g_hListView, i, 4, timeoutPolicyStr);
 
         char assetStr[32];
         if (g_bmpBuffers && g_bmpBuffers[i] && g_bmpSizes[i] > 0) {
@@ -1027,7 +1058,7 @@ static void RefreshListView(void) {
         } else {
             snprintf(assetStr, sizeof(assetStr), "-");
         }
-        ListView_SetItemText(g_hListView, i, 4, assetStr);
+        ListView_SetItemText(g_hListView, i, 5, assetStr);
     }
 
     if (g_stepCount > 0) {
@@ -1049,17 +1080,13 @@ static void CommitInPlaceEdit(BOOL save) {
     if (save && item >= 0 && item < (int)g_stepCount) {
         char buf[64] = {0};
         GetWindowTextA(hEdit, buf, sizeof(buf));
-        DWORD newTimeout = 0;
-        int newAction = TTP_GET_TIMEOUT_ACTION(g_steps[item].targetMode);
-        ParseTimeoutString(buf, &newTimeout, &newAction);
-        if (newTimeout > 0) {
-            g_steps[item].timeoutMs = newTimeout;
-            DWORD baseMode = TTP_GET_BASE_TARGET_MODE(g_steps[item].targetMode);
-            g_steps[item].targetMode = TTP_MAKE_TARGET_MODE(baseMode, newAction);
-            char outStr[64];
-            FormatTimeoutString(&g_steps[item], outStr, sizeof(outStr));
-            ListView_SetItemText(g_hListView, item, 3, outStr);
-        }
+        double sec = atof(buf);
+        if (sec <= 0.05) sec = 0.1;
+        if (sec > 300.0) sec = 300.0;
+        g_steps[item].timeoutMs = (DWORD)(sec * 1000.0);
+        char outStr[32];
+        FormatTimeoutSecondsString(&g_steps[item], outStr, sizeof(outStr));
+        ListView_SetItemText(g_hListView, item, 3, outStr);
     }
     DestroyWindow(hEdit);
     SetFocus(g_hListView);
@@ -1112,6 +1139,34 @@ static void StartInPlaceTimeoutEdit(int item) {
     g_OldEditProc = (WNDPROC)SetWindowLongPtrA(g_hInPlaceEdit, GWLP_WNDPROC, (LONG_PTR)InPlaceEditSubclassProc);
     SetFocus(g_hInPlaceEdit);
     SendMessageA(g_hInPlaceEdit, EM_SETSEL, 0, -1);
+}
+
+static void ShowTimeoutPolicyMenu(HWND hwnd, int item) {
+    if (item < 0 || item >= (int)g_stepCount) return;
+
+    int act = TTP_GET_TIMEOUT_ACTION(g_steps[item].targetMode);
+    DWORD baseMode = TTP_GET_BASE_TARGET_MODE(g_steps[item].targetMode);
+
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+
+    AppendMenuA(hMenu, MF_STRING | (act == 0 ? MF_CHECKED : 0), 9101, "[Prompt] Ask User");
+    AppendMenuA(hMenu, MF_STRING | (act == 1 ? MF_CHECKED : 0), 9102, "[Retry] Retry Loop");
+    AppendMenuA(hMenu, MF_STRING | (act == 2 ? MF_CHECKED : 0), 9103, "[Coord] Click Recorded Pos");
+    AppendMenuA(hMenu, MF_STRING | (act == 3 ? MF_CHECKED : 0), 9104, "[Skip] Skip Step");
+    AppendMenuA(hMenu, MF_STRING | (act == 4 ? MF_CHECKED : 0), 9105, "[Stop] Stop Macro");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hwnd);
+    UINT cmd = TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+    DestroyMenu(hMenu);
+
+    if (cmd >= 9101 && cmd <= 9105) {
+        int chosenAct = (int)(cmd - 9101);
+        g_steps[item].targetMode = TTP_MAKE_TARGET_MODE(baseMode, chosenAct);
+        RefreshListView();
+    }
 }
 
 /* =========================================================================
@@ -1550,16 +1605,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         ListView_SetExtendedListViewStyle(g_hListView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
         SendMessageA(g_hListView, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
 
-        /* Add columns: #, Action, Target / Text, Timeout(s), Asset */
+        /* Add columns: #, Action, Target, Timeout, On Timeout, Asset */
         LVCOLUMNA lvc;
         memset(&lvc, 0, sizeof(lvc));
         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
 
-        lvc.iSubItem = 0; lvc.cx = 32;  lvc.pszText = "#";            ListView_InsertColumn(g_hListView, 0, &lvc);
-        lvc.iSubItem = 1; lvc.cx = 65;  lvc.pszText = "Action";       ListView_InsertColumn(g_hListView, 1, &lvc);
-        lvc.iSubItem = 2; lvc.cx = 125; lvc.pszText = "Target / Text"; ListView_InsertColumn(g_hListView, 2, &lvc);
-        lvc.iSubItem = 3; lvc.cx = 75;  lvc.pszText = "Timeout(s)";   ListView_InsertColumn(g_hListView, 3, &lvc);
-        lvc.iSubItem = 4; lvc.cx = 60;  lvc.pszText = "Asset";        ListView_InsertColumn(g_hListView, 4, &lvc);
+        for (int i = 0; i < DRAWER_COLUMN_COUNT; i++) {
+            lvc.iSubItem = i;
+            lvc.cx = g_drawerColumns[i].width;
+            lvc.pszText = (LPSTR)g_drawerColumns[i].header;
+            ListView_InsertColumn(g_hListView, i, &lvc);
+        }
 
         /* Drawer Quick Action buttons */
         g_hBtnAdd = CreateWindowExA(0, "BUTTON", "[+ Add]", WS_CHILD | BS_PUSHBUTTON,
@@ -1676,9 +1732,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         LPNMHDR pnmh = (LPNMHDR)lParam;
         if (pnmh->idFrom == ID_LV_STEPS && pnmh->code == NM_DBLCLK) {
             LPNMITEMACTIVATE pia = (LPNMITEMACTIVATE)lParam;
-            if (pia->iItem >= 0 && pia->iItem < (int)g_stepCount && pia->iSubItem == 3) {
-                StartInPlaceTimeoutEdit(pia->iItem);
-                return 0;
+            if (pia->iItem >= 0 && pia->iItem < (int)g_stepCount) {
+                if (pia->iSubItem == 3) {
+                    StartInPlaceTimeoutEdit(pia->iItem);
+                    return 0;
+                } else if (pia->iSubItem == 4) {
+                    ShowTimeoutPolicyMenu(hwnd, pia->iItem);
+                    return 0;
+                }
             }
         }
         break;

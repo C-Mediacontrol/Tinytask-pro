@@ -121,11 +121,49 @@ static void test_timeout_formatting(void) {
     assert(strstr(outStr, "0.8s") != NULL || strstr(outStr, "0.7s") != NULL);
     assert(strstr(outStr, "[Retry]") != NULL);
 
+    /* FormatTimeoutSecondsString assertions: pure numeric seconds with 's' */
+    char secBuf[32];
+    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
+    assert(strcmp(secBuf, "3.0s") == 0);
+
+    step1.timeoutMs = 500;
+    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
+    assert(strcmp(secBuf, "0.5s") == 0);
+
+    step1.timeoutMs = 1200;
+    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
+    assert(strcmp(secBuf, "1.2s") == 0);
+
+    /* FormatTimeoutPolicyString assertions: [Prompt], [Retry], [Coord], [Skip], [Stop] */
+    char polBuf[32];
+    TTPStep stepPol;
+    memset(&stepPol, 0, sizeof(stepPol));
+
+    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_DEFAULT);
+    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
+    assert(strcmp(polBuf, "[Prompt]") == 0);
+
+    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_RETRY);
+    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
+    assert(strcmp(polBuf, "[Retry]") == 0);
+
+    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_USE_RECORDED);
+    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
+    assert(strcmp(polBuf, "[Coord]") == 0);
+
+    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_SKIP);
+    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
+    assert(strcmp(polBuf, "[Skip]") == 0);
+
+    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_STOP);
+    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
+    assert(strcmp(polBuf, "[Stop]") == 0);
+
     printf("      => PASSED (Timeout parse and format verified)\n");
 }
 
 /* -------------------------------------------------------------------------
- * Test 3: Action & Target column text representation
+ * Test 3: Action & Target column text representation & 6-column Drawer layout
  * ------------------------------------------------------------------------- */
 static void test_column_formatting(void) {
     printf("[TEST 3/6] Running test_column_formatting...\n");
@@ -161,6 +199,15 @@ static void test_column_formatting(void) {
     sCoord.origY = 340;
     GetTargetDescription(&sCoord, desc, sizeof(desc));
     assert(strstr(desc, "120") != NULL && strstr(desc, "340") != NULL);
+
+    /* Verify 6 drawer columns with headers "#", "Action", "Target", "Timeout", "On Timeout", "Asset" */
+    assert(DRAWER_COLUMN_COUNT == 6);
+    assert(strcmp(g_drawerColumns[0].header, "#") == 0 && g_drawerColumns[0].width == 28);
+    assert(strcmp(g_drawerColumns[1].header, "Action") == 0 && g_drawerColumns[1].width == 52);
+    assert(strcmp(g_drawerColumns[2].header, "Target") == 0 && g_drawerColumns[2].width == 95);
+    assert(strcmp(g_drawerColumns[3].header, "Timeout") == 0 && g_drawerColumns[3].width == 50);
+    assert(strcmp(g_drawerColumns[4].header, "On Timeout") == 0 && g_drawerColumns[4].width == 75);
+    assert(strcmp(g_drawerColumns[5].header, "Asset") == 0 && g_drawerColumns[5].width == 40);
 
     printf("      => PASSED (Action and target column strings verified)\n");
 }
