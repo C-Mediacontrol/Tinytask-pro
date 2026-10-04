@@ -92,12 +92,21 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     RECT fullRc = { 0, 0, ROI_SIZE, ROI_SIZE };
     FillRect(hdcMem, &fullRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
-    BitBlt(hdcMem, 0, 0, ROI_SIZE, ROI_SIZE, hdc, roiLeft, roiTop, SRCCOPY);
+    if (!BitBlt(hdcMem, 0, 0, ROI_SIZE, ROI_SIZE, hdc, roiLeft, roiTop, SRCCOPY)) {
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
     GdiFlush();
 
-    /* 1. Compute grayscale luminance */
+    /* 1. Compute grayscale luminance & verify texture variance */
     BYTE gray[256][256];
     const BYTE* srcPix = (const BYTE*)pBits;
+    double sumG = 0.0, sumSqG = 0.0;
+    int nG = ROI_SIZE * ROI_SIZE;
+
     for (int y = 0; y < ROI_SIZE; y++) {
         for (int x = 0; x < ROI_SIZE; x++) {
             const BYTE* px = srcPix + (y * ROI_SIZE + x) * 4;
@@ -108,7 +117,20 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
             if (lum < 0) lum = 0;
             if (lum > 255) lum = 255;
             gray[y][x] = (BYTE)lum;
+            double dLum = (double)lum;
+            sumG += dLum;
+            sumSqG += dLum * dLum;
         }
+    }
+
+    double varG = (sumSqG - (sumG * sumG) / nG) / nG;
+    if (varG <= 1.0) {
+        /* Flat uniform surface (pure white/black/solid color) without features */
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
     }
 
     /* 2. Compute 3x3 Sobel gradients */
@@ -529,7 +551,16 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     }
 
     HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
-    BitBlt(hdcMem, 0, 0, screenW, screenH, hdc, 0, 0, SRCCOPY);
+    if (!BitBlt(hdcMem, 0, 0, screenW, screenH, hdc, 0, 0, SRCCOPY)) {
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        if (nT2) free(nT2);
+        free(nT);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        if (outScore) *outScore = 0.0;
+        return FALSE;
+    }
     GdiFlush();
 
     int screenPixels = screenW * screenH;
@@ -630,34 +661,36 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                     }
                 }
 
-                /* Pass 2: Fine polish in +-8 px window around coarse peak in full resolution */
-                int cX = bestCoarseX * 2;
-                int cY = bestCoarseY * 2;
-                int fineX0 = max(0, cX - 8);
-                int fineX1 = min(screenW - tw, cX + 8);
-                int fineY0 = max(0, cY - 8);
-                int fineY1 = min(screenH - th, cY + 8);
+                /* Pass 2: Fine polish only if coarse score passes tolerance threshold (>= 0.35) */
+                if (bestCoarseScore >= 0.35) {
+                    int cX = bestCoarseX * 2;
+                    int cY = bestCoarseY * 2;
+                    int fineX0 = max(0, cX - 8);
+                    int fineX1 = min(screenW - tw, cX + 8);
+                    int fineY0 = max(0, cY - 8);
+                    int fineY1 = min(screenH - th, cY + 8);
 
-                for (int y = fineY0; y <= fineY1; y++) {
-                    for (int x = fineX0; x <= fineX1; x++) {
-                        double sumI = 0.0, sumI2 = 0.0, num = 0.0;
-                        for (int v = 0; v < th; v++) {
-                            const double* pS = &S[(y + v) * screenW + x];
-                            const double* pnT = &nT[v * tw];
-                            for (int u = 0; u < tw; u++) {
-                                double val = pS[u];
-                                sumI += val;
-                                sumI2 += val * val;
-                                num += pnT[u] * val;
+                    for (int y = fineY0; y <= fineY1; y++) {
+                        for (int x = fineX0; x <= fineX1; x++) {
+                            double sumI = 0.0, sumI2 = 0.0, num = 0.0;
+                            for (int v = 0; v < th; v++) {
+                                const double* pS = &S[(y + v) * screenW + x];
+                                const double* pnT = &nT[v * tw];
+                                for (int u = 0; u < tw; u++) {
+                                    double val = pS[u];
+                                    sumI += val;
+                                    sumI2 += val * val;
+                                    num += pnT[u] * val;
+                                }
                             }
-                        }
-                        double varI = sumI2 - (sumI * sumI) / N;
-                        if (varI <= 25.0) continue;
-                        double score = num / sqrt(varI);
-                        if (score > bestScore) {
-                            bestScore = score;
-                            bestX = x;
-                            bestY = y;
+                            double varI = sumI2 - (sumI * sumI) / N;
+                            if (varI <= 25.0) continue;
+                            double score = num / sqrt(varI);
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestX = x;
+                                bestY = y;
+                            }
                         }
                     }
                 }

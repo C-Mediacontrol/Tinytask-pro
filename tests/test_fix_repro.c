@@ -444,7 +444,108 @@ int main() {
 
     printf("Test 10C (ttp_engine.c Cascaded Invariant): roiCount=%d (expected >= 2)\n", roiCount);
     fflush(stdout);
-    assert(roiCount >= 2); // Fails (RED) until ttp_engine.c is updated
+    assert(roiCount >= 2);
+
+    // =========================================================================
+    // Test 11: Top-Left Misclick Protection & Displaced Target Robustness
+    // (Power Automate Tolerance Gate, Input Injection Order, Zero-Variance Crop)
+    // =========================================================================
+    printf("\nTest 11: Top-Left Misclick Protection & Robust Displaced Matching\n");
+    fflush(stdout);
+
+    // 11A: Adaptive crop rejects flat zero-variance regions
+    HDC hdcScr11 = GetDC(NULL);
+    HDC hdcFlat = CreateCompatibleDC(hdcScr11);
+    BITMAPINFO biFlat = {0};
+    biFlat.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    biFlat.bmiHeader.biWidth = 300;
+    biFlat.bmiHeader.biHeight = -300;
+    biFlat.bmiHeader.biPlanes = 1;
+    biFlat.bmiHeader.biBitCount = 32;
+    void* bitsFlat = NULL;
+    HBITMAP hBmpFlat = CreateDIBSection(hdcFlat, &biFlat, DIB_RGB_COLORS, &bitsFlat, NULL, 0);
+    SelectObject(hdcFlat, hBmpFlat);
+    RECT rcFlat = {0, 0, 300, 300};
+    FillRect(hdcFlat, &rcFlat, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+    RECT cropFlatRect = {0};
+    BYTE* bmpFlatData = NULL;
+    DWORD bmpFlatSize = 0;
+    BOOL cropFlatRes = ttp_adaptive_crop_button(hdcFlat, 150, 150, &cropFlatRect, &bmpFlatData, &bmpFlatSize);
+    printf("Test 11A (Reject flat zero-variance crop): cropFlatRes=%d (expected FALSE/0)\n", cropFlatRes);
+    fflush(stdout);
+    if (bmpFlatData) free(bmpFlatData);
+    DeleteObject(hBmpFlat);
+    DeleteDC(hdcFlat);
+    ReleaseDC(NULL, hdcScr11);
+    assert(cropFlatRes == FALSE); // RED on unfixed code (which returned TRUE with 7254 bytes)
+
+    // 11B: Invariant check on ttp_engine.c input injection order:
+    // mouse_event must be followed by SetCursorPos (aligning with original tinytask.c),
+    // ensuring normalized coordinate truncation does not misplace the cursor.
+    FILE* fpEng11 = fopen("reverse-gemini/src/ttp_engine.c", "rb");
+    assert(fpEng11 != NULL);
+    fseek(fpEng11, 0, SEEK_END);
+    long engSz11 = ftell(fpEng11);
+    fseek(fpEng11, 0, SEEK_SET);
+    char* engSrc11 = (char*)malloc(engSz11 + 1);
+    fread(engSrc11, 1, engSz11, fpEng11);
+    engSrc11[engSz11] = '\0';
+    fclose(fpEng11);
+
+    const char* clickCase = strstr(engSrc11, "case TTP_ACTION_CLICK:");
+    assert(clickCase != NULL);
+    const char* pMouseEv = strstr(clickCase, "mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE");
+    const char* pSetCur = strstr(clickCase, "SetCursorPos(targetX, targetY)");
+    assert(pMouseEv != NULL);
+    assert(pSetCur != NULL);
+    printf("Test 11B (Input Injection Order Invariant): pMouseEv=%p, pSetCur=%p\n", pMouseEv, pSetCur);
+    fflush(stdout);
+    // In original tinytask.c, mouse_event is called first, then SetCursorPos second.
+    // In unfixed ttp_engine.c, SetCursorPos was called first, so pSetCur < pMouseEv (fails RED).
+    assert(pMouseEv < pSetCur);
+    free(engSrc11);
+
+    // 11C: Coarse Pyramid Confidence Gate (Tolerance Threshold >= 0.35)
+    // When a button template is matched against a noisy screen that does NOT contain the button,
+    // coarse search must NOT fall back to (0,0) and Pass 2 must NOT lock into [0..8, 0..8].
+    int simW = 1280, simH = 720;
+    HDC hdcScrSim = GetDC(NULL);
+    HDC hdcSim = CreateCompatibleDC(hdcScrSim);
+    BITMAPINFO biSim = {0};
+    biSim.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    biSim.bmiHeader.biWidth = simW;
+    biSim.bmiHeader.biHeight = -simH;
+    biSim.bmiHeader.biPlanes = 1;
+    biSim.bmiHeader.biBitCount = 32;
+    void* bitsSim = NULL;
+    HBITMAP hBmpSim = CreateDIBSection(hdcSim, &biSim, DIB_RGB_COLORS, &bitsSim, NULL, 0);
+    SelectObject(hdcSim, hBmpSim);
+
+    // Fill with subtle textured background
+    for (int y = 0; y < simH; y++) {
+        for (int x = 0; x < simW; x++) {
+            BYTE val = (BYTE)(200 + (x % 7) * 2 + (y % 5) * 3);
+            SetPixel(hdcSim, x, y, RGB(val, val, val));
+        }
+    }
+
+    // Pattern created from different texture
+    DWORD diffPatSize = 0;
+    BYTE* diffPatBmp = create_test_pattern_bmp(40, 20, &diffPatSize);
+
+    POINT matchPos11 = { 999, 999 };
+    double score11 = 0.0;
+    BOOL matched11 = ttp_match_template_ncc(hdcSim, simW, simH, diffPatBmp, diffPatSize, 0.75, &matchPos11, &score11);
+    printf("Test 11C (Coarse Pyramid Confidence Gate on Absent Target): matched=%d, score=%.4f, pos=(%ld, %ld)\n",
+           matched11, score11, matchPos11.x, matchPos11.y);
+    fflush(stdout);
+    assert(matched11 == FALSE);
+
+    free(diffPatBmp);
+    DeleteObject(hBmpSim);
+    DeleteDC(hdcSim);
+    ReleaseDC(NULL, hdcScrSim);
 
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");

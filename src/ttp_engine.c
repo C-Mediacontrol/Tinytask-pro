@@ -665,11 +665,11 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
     DWORD absX = (DWORD)((targetX * 65535) / (scrW > 1 ? scrW - 1 : 1));
     DWORD absY = (DWORD)((targetY * 65535) / (scrH > 1 ? scrH - 1 : 1));
 
-    /* Input event execution */
+    /* Input event execution: mouse_event dispatched first, SetCursorPos hard-locks physical pixel (matching tinytask.c) */
     switch (step->actionType) {
     case TTP_ACTION_CLICK:
-        SetCursorPos(targetX, targetY);
         mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        SetCursorPos(targetX, targetY);
         Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         Sleep(15);
@@ -677,8 +677,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         break;
 
     case TTP_ACTION_DBLCLICK:
-        SetCursorPos(targetX, targetY);
         mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        SetCursorPos(targetX, targetY);
         Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -688,8 +688,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         break;
 
     case TTP_ACTION_RCLICK:
-        SetCursorPos(targetX, targetY);
         mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
+        SetCursorPos(targetX, targetY);
         Sleep(15);
         mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
         Sleep(15);
@@ -704,6 +704,7 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         LONG endX = step->destX + deltaX;
         LONG endY = step->destY + deltaY;
 
+        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, absX, absY, 0, 0);
         SetCursorPos(startX, startY);
         Sleep(15);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -712,6 +713,9 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         for (int i = 1; i <= steps; i++) {
             LONG cx = startX + (endX - startX) * i / steps;
             LONG cy = startY + (endY - startY) * i / steps;
+            DWORD acx = (DWORD)((cx * 65535ULL) / (scrW > 1 ? scrW - 1 : 1));
+            DWORD acy = (DWORD)((cy * 65535ULL) / (scrH > 1 ? scrH - 1 : 1));
+            mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, acx, acy, 0, 0);
             SetCursorPos(cx, cy);
             Sleep(10);
         }

@@ -1301,6 +1301,19 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
         char accName[128] = {0};
         ttp_get_accessible_name_at_point(pt, accName, sizeof(accName));
 
+        /* Power Automate Dual-Locator Rule:
+         * If accName merely matches the root parent window title (e.g. "Calculator", "Untitled - Notepad"),
+         * the element is NOT an accessible leaf control. Clear accName so visual image template is primary anchor! */
+        if (accName[0] != '\0' && hUnder != NULL) {
+            char rootTitle[128] = {0};
+            HWND hRoot = GetAncestor(hUnder, GA_ROOT);
+            if (hRoot && GetWindowTextA(hRoot, rootTitle, sizeof(rootTitle)) > 0) {
+                if (_stricmp(accName, rootTitle) == 0) {
+                    accName[0] = '\0';
+                }
+            }
+        }
+
         AddRecordedClick(pt.x, pt.y, now, bmpBuf, bmpSize, accName);
     } else if (!lDown && prevLDown) {
         ttp_synth_add_mouse_event(WM_LBUTTONUP, pt.x, pt.y, now);
@@ -2113,6 +2126,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance; (void)lpCmdLine;
     g_hInstance = hInstance;
+
+    /* DPI Awareness: Initialize process DPI awareness to ensure 1:1 desktop pixel mapping */
+    typedef BOOL (WINAPI *SetProcessDPIAwareFunc)(void);
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    if (hUser32) {
+        SetProcessDPIAwareFunc fnSetDPIAware = (SetProcessDPIAwareFunc)GetProcAddress(hUser32, "SetProcessDPIAware");
+        if (fnSetDPIAware) fnSetDPIAware();
+    }
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);

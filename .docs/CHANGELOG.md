@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.0] - 2026-10-04
+
+### Fixed
+- **目标移开后回放误点左上角修复（对齐 Power Automate 容差架构与原版 TinyTask 物理像素硬锁定）**:
+  - **金字塔粗检置信门槛（Tolerance Gate）**: 在 `ttp_match_template_ncc` 中加入 `bestCoarseScore >= 0.35` 严格置信度下限。当目标按钮移开或屏幕特征不足时，粗搜未命中立即放弃并进入超时兜底流程，彻底消除将初始值 $(0, 0)$ 喂入局部精修锁死在屏幕左上角 $[0..8, 0..8]$ 的伪峰值缺陷。
+  - **对齐原版 TinyTask 输入时序与物理像素锁定**: 将 `ttp_playback_step` 中 `mouse_event` 与 `SetCursorPos` 的调用时序调整为与官方原版完全一致（先派发 `mouse_event`，随即调用 `SetCursorPos` 硬校准），彻底消除由于归一化绝对坐标（0~65535）浮点截断或多屏/DPI 漂移反向覆盖物理像素的问题。
+  - **Power Automate 智能双轨锚定（父窗口标题过滤）**: 在 `RecTimerProc` 中，若 Accessible Name 获取到的仅是宿主顶级窗口标题（如“计算器”、“未命名 - 记事本”），自动剥离顶层标题，将主模式确定为 `TTP_TARGET_IMAGE`（以图像为第一主锚点），确保移动后的按钮完全依靠视觉图像精准锁定，避免被顶级窗口容器误导。
+  - **截屏与方差健康防御**: 在 `ttp_adaptive_crop_button` 中显式校验 `BitBlt` 返回值，并计算截取区域的灰度方差。对纯白/纯黑无纹理的异常截取（方差 $\le 1.0$）安全拦截并返回 `FALSE`，杜绝生成零方差死模板。
+  - **Per-Monitor DPI Aware 支持**: 在 `tinytask_pro.manifest` 中注入 `PerMonitorV2` DPI 感知声明，并在 `WinMain` 首行动态初始化 DPI 感知，确保所有 GDI 设备上下文与屏幕坐标在任何缩放比例下均实现 1:1 绝对物理像素对齐。
+
 ## [1.3.0] - 2026-10-04
 
 ### Fixed
