@@ -770,6 +770,66 @@ int main() {
         DeleteObject(hBmp13C);
         DeleteDC(hdcMem13C);
         ReleaseDC(NULL, hdcScr13C);
+
+        // 13D: Top-Right Corner Placement on 2560x1440 canvas (macro7 reproduction)
+        HDC hdcScr13D = GetDC(NULL);
+        HDC hdcMem13D = CreateCompatibleDC(hdcScr13D);
+        HBITMAP hBmp13D = CreateCompatibleBitmap(hdcScr13D, 2560, 1440);
+        SelectObject(hdcMem13D, hBmp13D);
+
+        // Fill background with contrasting wallpaper in top-right corner
+        RECT rcDesktop13D = { 0, 0, 2560, 1440 };
+        HBRUSH hbrDesk13D = CreateSolidBrush(RGB(180, 210, 230));
+        FillRect(hdcMem13D, &rcDesktop13D, hbrDesk13D);
+        DeleteObject(hbrDesk13D);
+
+        // Place icon at top-right corner (e.g. x=2480, y=30)
+        int trX = 2480, trY = 30;
+        for (int y = 0; y < bh; y++) {
+            int rowIdx = isBottomUp ? (bh - 1 - y) : y;
+            const BYTE* row = bPixels + rowIdx * bStride;
+            for (int x = 0; x < bw; x++) {
+                SetPixel(hdcMem13D, trX + x, trY + y, RGB(row[x * 3 + 2], row[x * 3 + 1], row[x * 3 + 0]));
+            }
+        }
+
+        POINT trMatchPt = { 0, 0 };
+        double trScore = 0.0;
+        BOOL trMatch = ttp_match_template_ncc(hdcMem13D, 2560, 1440, bBuf, bSize, 0.65, &trMatchPt, &trScore);
+        printf("Test 13D (Top-Right Corner Full Search): trMatch=%d, score=%.4f, pos=(%ld, %ld), expected=(%d, %d)\n",
+               trMatch, trScore, trMatchPt.x, trMatchPt.y, trX + bw / 2, trY + bh / 2);
+        fflush(stdout);
+        assert(trMatch == TRUE);
+        assert(trScore >= 0.65);
+        assert(abs(trMatchPt.x - (trX + bw / 2)) <= 2);
+        assert(abs(trMatchPt.y - (trY + bh / 2)) <= 2);
+
+        // Test playback step dual-engine fallback when icon moved to top-right corner
+        ttp_engine_set_screen_dc_override(hdcMem13D);
+        s_timeoutTriggered = 0;
+
+        TTPStep stepMacro7;
+        memset(&stepMacro7, 0, sizeof(stepMacro7));
+        stepMacro7.stepId = 1;
+        stepMacro7.actionType = TTP_ACTION_CLICK;
+        stepMacro7.targetMode = TTP_TARGET_TEXT;
+        strcpy(stepMacro7.textKey, "iKuuuVPN");
+        stepMacro7.origX = 64;
+        stepMacro7.origY = 1017;
+        stepMacro7.timeoutMs = 1000;
+        stepMacro7.postDelayMs = 0;
+
+        BOOL playM7Res = ttp_playback_step(&stepMacro7, bBuf, bSize, NULL);
+        ttp_engine_set_screen_dc_override(NULL);
+        printf("Test 13D (Macro7 Playback with Top-Right Icon): playRes=%d, timeoutTriggered=%d\n",
+               playM7Res, s_timeoutTriggered);
+        fflush(stdout);
+        assert(playM7Res == TRUE);
+        assert(s_timeoutTriggered == 0);
+
+        DeleteObject(hBmp13D);
+        DeleteDC(hdcMem13D);
+        ReleaseDC(NULL, hdcScr13D);
         free(bBuf);
     }
 

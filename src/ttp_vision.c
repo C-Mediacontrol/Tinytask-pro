@@ -835,8 +835,9 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
 
                 int maxX2 = W2 - TW2;
                 int maxY2 = H2 - TH2;
-                double bestCoarseScore = -1.0;
-                int bestCoarseX = 0, bestCoarseY = 0;
+                typedef struct { int x; int y; double score; } CoarseCand;
+                CoarseCand cands[8];
+                int candCount = 0;
 
                 for (int y2 = 0; y2 <= maxY2; y2++) {
                     int y1_idx = y2 * satStride2;
@@ -860,18 +861,46 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                             }
                         }
                         double score = num / denomI;
-                        if (score > bestCoarseScore) {
-                            bestCoarseScore = score;
-                            bestCoarseX = x2;
-                            bestCoarseY = y2;
+                        if (score >= 0.35) {
+                            int foundIdx = -1;
+                            int minDist = (TW2 > TH2) ? (TH2 / 2) : (TW2 / 2);
+                            if (minDist < 4) minDist = 4;
+                            for (int k = 0; k < candCount; k++) {
+                                if (abs(cands[k].x - x2) <= minDist && abs(cands[k].y - y2) <= minDist) {
+                                    foundIdx = k;
+                                    break;
+                                }
+                            }
+                            if (foundIdx >= 0) {
+                                if (score > cands[foundIdx].score) {
+                                    cands[foundIdx].x = x2;
+                                    cands[foundIdx].y = y2;
+                                    cands[foundIdx].score = score;
+                                }
+                            } else if (candCount < 8) {
+                                cands[candCount].x = x2;
+                                cands[candCount].y = y2;
+                                cands[candCount].score = score;
+                                candCount++;
+                            } else {
+                                int minIdx = 0;
+                                for (int k = 1; k < candCount; k++) {
+                                    if (cands[k].score < cands[minIdx].score) minIdx = k;
+                                }
+                                if (score > cands[minIdx].score) {
+                                    cands[minIdx].x = x2;
+                                    cands[minIdx].y = y2;
+                                    cands[minIdx].score = score;
+                                }
+                            }
                         }
                     }
                 }
 
-                /* Pass 2: Fine polish only if coarse score passes tolerance threshold (>= 0.35) */
-                if (bestCoarseScore >= 0.35) {
-                    int cX = bestCoarseX * 2;
-                    int cY = bestCoarseY * 2;
+                /* Pass 2: Fine polish on top coarse candidates */
+                for (int k = 0; k < candCount; k++) {
+                    int cX = cands[k].x * 2;
+                    int cY = cands[k].y * 2;
                     int fineX0 = max(0, cX - 8);
                     int fineX1 = min(screenW - tw, cX + 8);
                     int fineY0 = max(0, cY - 8);
@@ -944,11 +973,12 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         *outScore = (bestScore < -1.0) ? 0.0 : bestScore;
     }
 
+    if (outMatchPos && bestScore > -1.0) {
+        outMatchPos->x = bestX + tw / 2;
+        outMatchPos->y = bestY + th / 2;
+    }
+
     if (bestScore >= minScore) {
-        if (outMatchPos) {
-            outMatchPos->x = bestX + tw / 2;
-            outMatchPos->y = bestY + th / 2;
-        }
         return TRUE;
     }
 
@@ -1123,11 +1153,11 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
 
     free(sat1); free(sat2); free(S); free(nT);
     if (outScore) *outScore = (bestScore < -1.0) ? 0.0 : bestScore;
+    if (outMatchPos && bestScore > -1.0) {
+        outMatchPos->x = x0 + bestX + tw / 2;
+        outMatchPos->y = y0 + bestY + th / 2;
+    }
     if (bestScore >= minScore) {
-        if (outMatchPos) {
-            outMatchPos->x = x0 + bestX + tw / 2;
-            outMatchPos->y = y0 + bestY + th / 2;
-        }
         return TRUE;
     }
     return FALSE;
