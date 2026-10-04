@@ -290,6 +290,162 @@ int main() {
     // MUST FAIL ON CURRENT CODE (RED PHASE)
     assert(hasLatchVar && hasTimer25 && hasKeySeed && hasTrailingTrim && !hasSleepBeforeRec);
 
+    // ==========================================================
+    // Test 10: Hierarchical Cascaded Vision Matching
+    // ==========================================================
+    printf("Test 10 (Cascaded Vision Matching): starting...\n");
+    fflush(stdout);
+
+    int canvasW = 2560, canvasH = 1440;
+    int patW = 64, patH = 32;
+    DWORD patSize = 0;
+    BYTE* patBmp = create_test_pattern_bmp(patW, patH, &patSize);
+
+    HDC hdcScr10 = GetDC(NULL);
+    HDC hdcMem10 = CreateCompatibleDC(hdcScr10);
+    HBITMAP hBmpCanvas10 = CreateCompatibleBitmap(hdcScr10, canvasW, canvasH);
+    SelectObject(hdcMem10, hBmpCanvas10);
+
+    // 10A: Near target at (60, 60), orig=(50, 50). ROI radius = 200px.
+    RECT rcBg10 = { 0, 0, canvasW, canvasH };
+    HBRUSH hbrBg10 = CreateSolidBrush(RGB(240, 240, 240));
+    FillRect(hdcMem10, &rcBg10, hbrBg10);
+
+    int nearX = 60, nearY = 60;
+    for (int y = 0; y < patH; y++) {
+        for (int x = 0; x < patW; x++) {
+            BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 230 : 20;
+            SetPixel(hdcMem10, nearX + x, nearY + y, RGB(v, v, v));
+        }
+    }
+
+    POINT pos10 = { 50, 50 };
+    double score10 = 0.0;
+    LARGE_INTEGER qpcFreq, qpcStart, qpcEnd;
+    QueryPerformanceFrequency(&qpcFreq);
+    QueryPerformanceCounter(&qpcStart);
+    BOOL matchedNear = ttp_match_template_ncc_roi(hdcMem10, 50, 50, 200, patBmp, patSize, 0.75, &pos10, &score10);
+    QueryPerformanceCounter(&qpcEnd);
+    double durRoiMs = (double)(qpcEnd.QuadPart - qpcStart.QuadPart) * 1000.0 / (double)qpcFreq.QuadPart;
+
+    printf("Test 10A (Tier 1 ROI fast hit): matched=%d, pos=(%ld,%ld), score=%.3f, dur=%.2f ms\n",
+           matchedNear, pos10.x, pos10.y, score10, durRoiMs);
+    fflush(stdout);
+    assert(matchedNear == TRUE);
+    assert(abs(pos10.x - (nearX + patW / 2)) <= 2);
+    assert(abs(pos10.y - (nearY + patH / 2)) <= 2);
+    assert(score10 >= 0.75);
+    assert(durRoiMs < 10.0);
+
+    // Verify engine playback step handles near target fast hit
+    ttp_engine_set_screen_dc_override(hdcMem10);
+    s_timeoutTriggered = 0;
+    TTPStep stepNear;
+    memset(&stepNear, 0, sizeof(stepNear));
+    stepNear.stepId = 100;
+    stepNear.actionType = TTP_ACTION_CLICK;
+    stepNear.targetMode = TTP_TARGET_IMAGE;
+    stepNear.origX = 50;
+    stepNear.origY = 50;
+    stepNear.timeoutMs = 500;
+    BOOL playNearRes = ttp_playback_step(&stepNear, patBmp, patSize, NULL);
+    assert(playNearRes == TRUE);
+    assert(s_timeoutTriggered == 0);
+
+    // 10B: Target moved far away to (1950, 1150), orig=(50, 50).
+    // Outside the 200px ROI: Tier 1 misses, Tier 2 full-screen fallback succeeds.
+    FillRect(hdcMem10, &rcBg10, hbrBg10);
+    int farX = 1950, farY = 1150;
+    for (int y = 0; y < patH; y++) {
+        for (int x = 0; x < patW; x++) {
+            BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 230 : 20;
+            SetPixel(hdcMem10, farX + x, farY + y, RGB(v, v, v));
+        }
+    }
+
+    POINT posFar = { 50, 50 };
+    double scoreFar = 0.0;
+    // Tier 1 search within 200px ROI of (50, 50) must miss
+    BOOL matchedFarRoi = ttp_match_template_ncc_roi(hdcMem10, 50, 50, 200, patBmp, patSize, 0.75, &posFar, &scoreFar);
+    printf("Test 10B (Tier 1 ROI miss on far target): matchedFarRoi=%d\n", matchedFarRoi);
+    fflush(stdout);
+    assert(matchedFarRoi == FALSE);
+
+    // Cascaded Search: Fall back to Tier 2 full-screen pyramid search
+    BOOL matchedFarCascaded = matchedFarRoi;
+    if (!matchedFarCascaded) {
+        matchedFarCascaded = ttp_match_template_ncc(hdcMem10, canvasW, canvasH, patBmp, patSize, 0.75, &posFar, &scoreFar);
+    }
+    printf("Test 10B (Tier 2 Fallback Hit): matched=%d, pos=(%ld,%ld), score=%.3f\n",
+           matchedFarCascaded, posFar.x, posFar.y, scoreFar);
+    fflush(stdout);
+    assert(matchedFarCascaded == TRUE);
+    assert(abs(posFar.x - (farX + patW / 2)) <= 2);
+    assert(abs(posFar.y - (farY + patH / 2)) <= 2);
+    assert(scoreFar >= 0.75);
+
+    // Verify engine playback step handles far target via Tier 2 fallback for both image mode and text fallback
+    TTPStep stepFar;
+    memset(&stepFar, 0, sizeof(stepFar));
+    stepFar.stepId = 101;
+    stepFar.actionType = TTP_ACTION_CLICK;
+    stepFar.targetMode = TTP_TARGET_IMAGE;
+    stepFar.origX = 50;
+    stepFar.origY = 50;
+    stepFar.timeoutMs = 1000;
+    s_timeoutTriggered = 0;
+    BOOL playFarRes = ttp_playback_step(&stepFar, patBmp, patSize, NULL);
+    assert(playFarRes == TRUE);
+    assert(s_timeoutTriggered == 0);
+
+    // Dual-engine text fallback when target moved far away
+    TTPStep stepTextFar;
+    memset(&stepTextFar, 0, sizeof(stepTextFar));
+    stepTextFar.stepId = 102;
+    stepTextFar.actionType = TTP_ACTION_CLICK;
+    stepTextFar.targetMode = TTP_TARGET_TEXT;
+    strcpy(stepTextFar.textKey, "NonExistentFarButton_9999");
+    stepTextFar.origX = 50;
+    stepTextFar.origY = 50;
+    stepTextFar.timeoutMs = 1000;
+    s_timeoutTriggered = 0;
+    BOOL playTextFarRes = ttp_playback_step(&stepTextFar, patBmp, patSize, NULL);
+    assert(playTextFarRes == TRUE);
+    assert(s_timeoutTriggered == 0);
+
+    ttp_engine_set_screen_dc_override(NULL);
+
+    DeleteObject(hbrBg10);
+    DeleteObject(hBmpCanvas10);
+    DeleteDC(hdcMem10);
+    ReleaseDC(NULL, hdcScr10);
+    free(patBmp);
+
+    // 10C: Invariant check on ttp_engine.c implementation
+    // Verify that ttp_engine.c uses ttp_match_template_ncc_roi for Tier 1 fast search
+    // in both TTP_TARGET_TEXT dual-engine fallback and TTP_TARGET_IMAGE matching.
+    FILE* fpEng = fopen("reverse-gemini/src/ttp_engine.c", "rb");
+    assert(fpEng != NULL);
+    fseek(fpEng, 0, SEEK_END);
+    long engSz = ftell(fpEng);
+    fseek(fpEng, 0, SEEK_SET);
+    char* engSrc = (char*)malloc(engSz + 1);
+    fread(engSrc, 1, engSz, fpEng);
+    engSrc[engSz] = '\0';
+    fclose(fpEng);
+
+    int roiCount = 0;
+    const char* pRoi = engSrc;
+    while ((pRoi = strstr(pRoi, "ttp_match_template_ncc_roi")) != NULL) {
+        roiCount++;
+        pRoi += strlen("ttp_match_template_ncc_roi");
+    }
+    free(engSrc);
+
+    printf("Test 10C (ttp_engine.c Cascaded Invariant): roiCount=%d (expected >= 2)\n", roiCount);
+    fflush(stdout);
+    assert(roiCount >= 2); // Fails (RED) until ttp_engine.c is updated
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");

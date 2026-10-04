@@ -565,9 +565,17 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
                 int screenW = GetSystemMetrics(SM_CXSCREEN);
                 int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
+
+                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
+                if (!matched) {
+                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                }
+
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
 
                 if (matched) {
@@ -606,9 +614,17 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
                 int screenW = GetSystemMetrics(SM_CXSCREEN);
                 int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
+
+                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
+                if (!matched) {
+                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                }
+
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
 
                 if (matched) {
