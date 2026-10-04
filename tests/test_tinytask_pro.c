@@ -312,6 +312,130 @@ static void test_step_playback_execution(void) {
     printf("      => PASSED (Single step execution verified)\n");
 }
 
+/* -------------------------------------------------------------------------
+ * Test 7: Step edit dialog registration, tolerance logic & 32bpp alpha mask
+ * ------------------------------------------------------------------------- */
+static void test_step_edit_dialog_and_mask(void) {
+    printf("[TEST 7/7] Running test_step_edit_dialog_and_mask...\n");
+
+    /* 1. Verify window class registration */
+    HINSTANCE hInst = g_hInstance ? g_hInstance : GetModuleHandleA(NULL);
+    BOOL regOk = RegisterStepEditClasses(hInst);
+    assert(regOk == TRUE);
+
+    WNDCLASSEXA wcDlg = {0};
+    wcDlg.cbSize = sizeof(wcDlg);
+    BOOL dlgClassFound = GetClassInfoExA(hInst, "TTP_StepEditDlg", &wcDlg);
+    assert(dlgClassFound != 0);
+
+    WNDCLASSEXA wcCanvas = {0};
+    wcCanvas.cbSize = sizeof(wcCanvas);
+    BOOL canvasClassFound = GetClassInfoExA(hInst, "TTP_PreviewCanvas", &wcCanvas);
+    assert(canvasClassFound != 0);
+
+    /* 2. Create a mock step with 32bpp BMP image:
+     * 40x40 pixels, light gray background (210, 210, 210),
+     * centered 20x20 dark icon (20, 20, 20). */
+    StepArray_Clear();
+    assert(g_stepCount == 0);
+
+    int w = 40, h = 40;
+    DWORD pixelBytes = (DWORD)w * h * 4;
+    DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + pixelBytes;
+    BYTE* bmpBuf = (BYTE*)malloc(totalBmpSize);
+    assert(bmpBuf != NULL);
+    memset(bmpBuf, 0, totalBmpSize);
+
+    BITMAPFILEHEADER* bmfh = (BITMAPFILEHEADER*)bmpBuf;
+    bmfh->bfType = 0x4D42; /* 'BM' */
+    bmfh->bfSize = totalBmpSize;
+    bmfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+    BITMAPINFOHEADER* bmih = (BITMAPINFOHEADER*)(bmpBuf + sizeof(BITMAPFILEHEADER));
+    bmih->biSize = sizeof(BITMAPINFOHEADER);
+    bmih->biWidth = w;
+    bmih->biHeight = h; /* Bottom-up */
+    bmih->biPlanes = 1;
+    bmih->biBitCount = 32;
+    bmih->biCompression = BI_RGB;
+    bmih->biSizeImage = pixelBytes;
+
+    BYTE* px = bmpBuf + bmfh->bfOffBits;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int idx = (y * w + x) * 4;
+            if (x >= 10 && x < 30 && y >= 10 && y < 30) {
+                /* Centered dark icon */
+                px[idx + 0] = 20;
+                px[idx + 1] = 20;
+                px[idx + 2] = 20;
+                px[idx + 3] = 255;
+            } else {
+                /* Light gray background */
+                px[idx + 0] = 210;
+                px[idx + 1] = 210;
+                px[idx + 2] = 210;
+                px[idx + 3] = 255;
+            }
+        }
+    }
+
+    TTPStep s;
+    memset(&s, 0, sizeof(s));
+    s.actionType = TTP_ACTION_CLICK;
+    s.targetMode = TTP_TARGET_IMAGE;
+    s.origX = 200;
+    s.origY = 300;
+    s.chromaTol = 0;
+
+    BOOL addOk = StepArray_Add(&s, bmpBuf, totalBmpSize);
+    assert(addOk == TRUE);
+    assert(g_stepCount == 1);
+    free(bmpBuf); /* StepArray_Add makes its own copy */
+
+    /* 3. Apply tolerance = 25: verifies step->chromaTol updated and alpha mask generated */
+    BOOL apply25 = StepEdit_ApplyChromaTolerance(0, 25);
+    assert(apply25 == TRUE);
+    assert(g_steps[0].chromaTol == 25);
+
+    BYTE* stepBmp = g_bmpBuffers[0];
+    BITMAPFILEHEADER* sBmfh = (BITMAPFILEHEADER*)stepBmp;
+    BYTE* stepPx = stepBmp + sBmfh->bfOffBits;
+
+    /* Verify background border corners have alpha = 0 (transparent) */
+    assert(stepPx[(0 * w + 0) * 4 + 3] == 0);
+    assert(stepPx[(0 * w + (w - 1)) * 4 + 3] == 0);
+    assert(stepPx[((h - 1) * w + 0) * 4 + 3] == 0);
+    assert(stepPx[((h - 1) * w + (w - 1)) * 4 + 3] == 0);
+
+    /* Verify icon center has alpha = 255 (opaque foreground) */
+    assert(stepPx[(20 * w + 20) * 4 + 3] == 255);
+    assert(stepPx[(15 * w + 15) * 4 + 3] == 255);
+
+    /* Count foreground pixels (should be 20x20 = 400) */
+    int fgCount = 0;
+    for (int i = 0; i < w * h; i++) {
+        if (stepPx[i * 4 + 3] == 255) fgCount++;
+    }
+    assert(fgCount == 400);
+
+    /* 4. Apply tolerance = 0 (disabled): verifies all alpha channels reset to 255 */
+    BOOL apply0 = StepEdit_ApplyChromaTolerance(0, 0);
+    assert(apply0 == TRUE);
+    assert(g_steps[0].chromaTol == 0);
+
+    int opaqueCount = 0;
+    for (int i = 0; i < w * h; i++) {
+        if (stepPx[i * 4 + 3] == 255) opaqueCount++;
+    }
+    assert(opaqueCount == w * h);
+
+    /* 5. Clean up */
+    StepArray_Clear();
+    assert(g_stepCount == 0);
+    printf("      => PASSED (Step edit dialog registration, tolerance logic & 32bpp alpha mask verified)\n");
+}
+
 int main(void) {
     printf("====================================================\n");
     printf("        TinyTask Pro Unit & Integration Tests       \n");
@@ -323,9 +447,10 @@ int main(void) {
     test_titlebar_strings();
     test_project_storage_roundtrip();
     test_step_playback_execution();
+    test_step_edit_dialog_and_mask();
 
     printf("====================================================\n");
-    printf("  ALL 6 TINYTASK PRO TEST SUITES PASSED!            \n");
+    printf("  ALL 7 TINYTASK PRO TEST SUITES PASSED!            \n");
     printf("====================================================\n");
     return 0;
 }

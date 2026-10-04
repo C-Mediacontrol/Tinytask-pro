@@ -1194,6 +1194,487 @@ static void ShowTimeoutPolicyMenu(HWND hwnd, int item) {
 }
 
 /* =========================================================================
+ * 6.5 Step Edit Dialog & 60FPS Checkerboard Preview
+ * ========================================================================= */
+
+#define ID_STEPEDIT_EDIT_MENU   0x9301
+#define ID_STEPEDIT_CANVAS      0x9401
+#define ID_STEPEDIT_CHECK_MASK  0x9402
+#define ID_STEPEDIT_LABEL_TOL   0x9403
+#define ID_STEPEDIT_TRACK_TOL   0x9404
+#define ID_STEPEDIT_LABEL_INFO  0x9405
+
+static int   s_StepEditIndex = -1;
+static int   s_StepEditCurrentTol = 25;
+static BOOL  s_StepEditDlgRunning = FALSE;
+static HWND  s_hStepEditCanvas = NULL;
+static HWND  s_hStepEditCheckMask = NULL;
+static HWND  s_hStepEditTolLabel = NULL;
+static HWND  s_hStepEditTrackbar = NULL;
+
+static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
+    if (stepIndex < 0 || stepIndex >= (int)g_stepCount) return FALSE;
+    if (newTol < 0) newTol = 0;
+    if (newTol > 100) newTol = 100;
+
+    g_steps[stepIndex].chromaTol = (BYTE)newTol;
+
+    if (!g_bmpBuffers || !g_bmpBuffers[stepIndex] ||
+        g_bmpSizes[stepIndex] < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
+        return TRUE;
+    }
+
+    BYTE* bmpData = g_bmpBuffers[stepIndex];
+    BITMAPFILEHEADER* bmfh = (BITMAPFILEHEADER*)bmpData;
+    if (bmfh->bfType != 0x4D42) return TRUE;
+
+    BITMAPINFOHEADER* bmih = (BITMAPINFOHEADER*)(bmpData + sizeof(BITMAPFILEHEADER));
+    int tw = bmih->biWidth;
+    int th = abs(bmih->biHeight);
+    int bpp = bmih->biBitCount;
+    if (tw <= 0 || th <= 0) return TRUE;
+
+    if (bpp == 24) {
+        int srcStride = ((tw * 3 + 3) / 4) * 4;
+        int dstStride = tw * 4;
+        DWORD dstPixelDataSize = (DWORD)dstStride * th;
+        DWORD dstTotalSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + dstPixelDataSize;
+        BYTE* newBuf = (BYTE*)malloc(dstTotalSize);
+        if (newBuf) {
+            BITMAPFILEHEADER* newBmfh = (BITMAPFILEHEADER*)newBuf;
+            newBmfh->bfType = 0x4D42;
+            newBmfh->bfSize = dstTotalSize;
+            newBmfh->bfReserved1 = 0;
+            newBmfh->bfReserved2 = 0;
+            newBmfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+            BITMAPINFOHEADER* newBmih = (BITMAPINFOHEADER*)(newBuf + sizeof(BITMAPFILEHEADER));
+            memcpy(newBmih, bmih, sizeof(BITMAPINFOHEADER));
+            newBmih->biBitCount = 32;
+            newBmih->biSizeImage = dstPixelDataSize;
+
+            const BYTE* srcPix = bmpData + bmfh->bfOffBits;
+            BYTE* dstPix = newBuf + newBmfh->bfOffBits;
+            for (int y = 0; y < th; y++) {
+                const BYTE* sRow = srcPix + y * srcStride;
+                BYTE* dRow = dstPix + y * dstStride;
+                for (int x = 0; x < tw; x++) {
+                    dRow[x * 4 + 0] = sRow[x * 3 + 0];
+                    dRow[x * 4 + 1] = sRow[x * 3 + 1];
+                    dRow[x * 4 + 2] = sRow[x * 3 + 2];
+                    dRow[x * 4 + 3] = 255;
+                }
+            }
+            free(bmpData);
+            g_bmpBuffers[stepIndex] = newBuf;
+            g_bmpSizes[stepIndex] = dstTotalSize;
+            bmpData = newBuf;
+            bmfh = newBmfh;
+            bmih = newBmih;
+            bpp = 32;
+        }
+    }
+
+    if (bpp == 32) {
+        BYTE* pixelData = bmpData + bmfh->bfOffBits;
+        int totalPixels = tw * th;
+        if (newTol > 0) {
+            BYTE* mask = (BYTE*)malloc((size_t)totalPixels);
+            if (mask) {
+                if (ttp_chromakey_mask(pixelData, tw, th, 4, (BYTE)newTol, mask)) {
+                    for (int i = 0; i < totalPixels; i++) {
+                        pixelData[i * 4 + 3] = mask[i] ? 255 : 0;
+                    }
+                }
+                free(mask);
+            }
+        } else {
+            for (int i = 0; i < totalPixels; i++) {
+                pixelData[i * 4 + 3] = 255;
+            }
+        }
+    }
+
+    return TRUE;
+}
+
+static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
+    BYTE* canvasPixels = (BYTE*)malloc((size_t)cw * ch * 4);
+    if (!canvasPixels) return;
+
+    /* 1. 8x8 alternating light gray (RGB 230,230,230) and white (RGB 255,255,255) checkerboard */
+    for (int y = 0; y < ch; y++) {
+        for (int x = 0; x < cw; x++) {
+            int isGray = (((x / 8) + (y / 8)) & 1);
+            BYTE c = isGray ? 230 : 255;
+            int idx = (y * cw + x) * 4;
+            canvasPixels[idx + 0] = c; /* B */
+            canvasPixels[idx + 1] = c; /* G */
+            canvasPixels[idx + 2] = c; /* R */
+            canvasPixels[idx + 3] = 255;
+        }
+    }
+
+    BOOL hasImage = FALSE;
+    if (s_StepEditIndex >= 0 && s_StepEditIndex < (int)g_stepCount &&
+        g_bmpBuffers && g_bmpBuffers[s_StepEditIndex] &&
+        g_bmpSizes[s_StepEditIndex] >= sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER))
+    {
+        const BYTE* bmpData = g_bmpBuffers[s_StepEditIndex];
+        const BITMAPFILEHEADER* bmfh = (const BITMAPFILEHEADER*)bmpData;
+        const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpData + sizeof(BITMAPFILEHEADER));
+        if (bmfh->bfType == 0x4D42 && bmih->biWidth > 0 && bmih->biHeight != 0) {
+            int tw = bmih->biWidth;
+            int th = abs(bmih->biHeight);
+            BOOL isBottomUp = (bmih->biHeight > 0);
+            int bpp = bmih->biBitCount;
+            if (bpp == 24 || bpp == 32) {
+                int stride = ((tw * bpp + 31) / 32) * 4;
+                const BYTE* pixelData = bmpData + bmfh->bfOffBits;
+                if (bmfh->bfOffBits + (DWORD)stride * th <= g_bmpSizes[s_StepEditIndex]) {
+                    hasImage = TRUE;
+
+                    const BYTE* maskSrc = pixelData;
+                    BYTE* contigBuf = NULL;
+                    if (bpp == 24 && stride != tw * 3) {
+                        contigBuf = (BYTE*)malloc((size_t)tw * th * 3);
+                        if (contigBuf) {
+                            for (int y = 0; y < th; y++) {
+                                memcpy(contigBuf + y * (tw * 3), pixelData + y * stride, tw * 3);
+                            }
+                            maskSrc = contigBuf;
+                        }
+                    }
+
+                    BYTE* mask = (BYTE*)malloc((size_t)tw * th);
+                    if (mask) {
+                        if (s_StepEditCurrentTol == 0) {
+                            memset(mask, 1, (size_t)tw * th);
+                        } else {
+                            ttp_chromakey_mask(maskSrc, tw, th, bpp / 8, (BYTE)s_StepEditCurrentTol, mask);
+                        }
+
+                        double scaleX = (double)(cw - 8) / (double)tw;
+                        double scaleY = (double)(ch - 8) / (double)th;
+                        double scale = (scaleX < scaleY) ? scaleX : scaleY;
+                        if (scale > 3.0) scale = 3.0;
+                        int dstW = (int)(tw * scale + 0.5);
+                        int dstH = (int)(th * scale + 0.5);
+                        if (dstW < 1) dstW = 1;
+                        if (dstH < 1) dstH = 1;
+                        int dstX = (cw - dstW) / 2;
+                        int dstY = (ch - dstH) / 2;
+
+                        for (int dy = 0; dy < dstH; dy++) {
+                            int cy = dstY + dy;
+                            if (cy < 0 || cy >= ch) continue;
+                            int vy = (dstH == th) ? dy : (dy * th) / dstH;
+                            if (vy >= th) vy = th - 1;
+                            int bmpY = isBottomUp ? (th - 1 - vy) : vy;
+
+                            for (int dx = 0; dx < dstW; dx++) {
+                                int cx = dstX + dx;
+                                if (cx < 0 || cx >= cw) continue;
+                                int vx = (dstW == tw) ? dx : (dx * tw) / dstW;
+                                if (vx >= tw) vx = tw - 1;
+
+                                BYTE mVal = mask[bmpY * tw + vx];
+                                if (mVal != 0) {
+                                    const BYTE* px = pixelData + bmpY * stride + vx * (bpp / 8);
+                                    int cIdx = (cy * cw + cx) * 4;
+                                    canvasPixels[cIdx + 0] = px[0]; /* B */
+                                    canvasPixels[cIdx + 1] = px[1]; /* G */
+                                    canvasPixels[cIdx + 2] = px[2]; /* R */
+                                }
+                            }
+                        }
+                        free(mask);
+                    }
+                    if (contigBuf) free(contigBuf);
+                }
+            }
+        }
+    }
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = cw;
+    bi.bmiHeader.biHeight = -ch; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    SetDIBitsToDevice(hdc, 0, 0, cw, ch, 0, 0, 0, ch, canvasPixels, &bi, DIB_RGB_COLORS);
+
+    if (!hasImage) {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(90, 90, 90));
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HGDIOBJ hOld = SelectObject(hdc, hFont);
+        RECT rcText = { 0, 0, cw, ch };
+        DrawTextA(hdc, "(No image asset / Coordinate mode)", -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, hOld);
+    }
+
+    free(canvasPixels);
+}
+
+static LRESULT CALLBACK PreviewCanvasWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int cw = rc.right - rc.left;
+        int ch = rc.bottom - rc.top;
+        if (cw > 0 && ch > 0) {
+            PreviewCanvas_Paint(hdc, cw, ch);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    default:
+        return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+    }
+}
+
+static LRESULT CALLBACK StepEditDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE: {
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+        char headerText[256] = "";
+        if (s_StepEditIndex >= 0 && s_StepEditIndex < (int)g_stepCount) {
+            TTPStep* s = &g_steps[s_StepEditIndex];
+            char targetDesc[128] = "";
+            GetTargetDescription(s, targetDesc, sizeof(targetDesc));
+            snprintf(headerText, sizeof(headerText), "Step #%d: %s at %s",
+                s_StepEditIndex + 1, GetActionName(s->actionType), targetDesc);
+        }
+
+        HWND hHeader = CreateWindowExA(0, "STATIC", headerText,
+            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_WORDELLIPSIS,
+            20, 14, 340, 20, hwnd, (HMENU)ID_STEPEDIT_LABEL_INFO, g_hInstance, NULL);
+        SendMessageA(hHeader, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        s_hStepEditCanvas = CreateWindowExA(WS_EX_CLIENTEDGE, "TTP_PreviewCanvas", "",
+            WS_CHILD | WS_VISIBLE,
+            70, 42, 240, 180, hwnd, (HMENU)ID_STEPEDIT_CANVAS, g_hInstance, NULL);
+
+        s_hStepEditCheckMask = CreateWindowExA(0, "BUTTON", "Enable Background Transparency Mask",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            50, 232, 280, 22, hwnd, (HMENU)ID_STEPEDIT_CHECK_MASK, g_hInstance, NULL);
+        SendMessageA(s_hStepEditCheckMask, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageA(s_hStepEditCheckMask, BM_SETCHECK, (s_StepEditCurrentTol > 0) ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        char tolText[64];
+        snprintf(tolText, sizeof(tolText), "Transparency Tolerance: %d", s_StepEditCurrentTol);
+        s_hStepEditTolLabel = CreateWindowExA(0, "STATIC", tolText,
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            50, 260, 280, 18, hwnd, (HMENU)ID_STEPEDIT_LABEL_TOL, g_hInstance, NULL);
+        SendMessageA(s_hStepEditTolLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        s_hStepEditTrackbar = CreateWindowExA(0, TRACKBAR_CLASSA, "Tolerance",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+            45, 285, 290, 32, hwnd, (HMENU)ID_STEPEDIT_TRACK_TOL, g_hInstance, NULL);
+        SendMessageA(s_hStepEditTrackbar, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+        SendMessageA(s_hStepEditTrackbar, TBM_SETTICFREQ, 10, 0);
+        SendMessageA(s_hStepEditTrackbar, TBM_SETPOS, TRUE, s_StepEditCurrentTol);
+
+        BOOL hasImage = (s_StepEditIndex >= 0 && s_StepEditIndex < (int)g_stepCount &&
+                         g_bmpBuffers && g_bmpBuffers[s_StepEditIndex] && g_bmpSizes[s_StepEditIndex] > 0);
+        if (!hasImage) {
+            EnableWindow(s_hStepEditCheckMask, FALSE);
+            EnableWindow(s_hStepEditTrackbar, FALSE);
+        }
+
+        HWND hBtnOk = CreateWindowExA(0, "BUTTON", "OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            95, 335, 85, 26, hwnd, (HMENU)IDOK, g_hInstance, NULL);
+        SendMessageA(hBtnOk, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        HWND hBtnCancel = CreateWindowExA(0, "BUTTON", "Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            200, 335, 85, 26, hwnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+        SendMessageA(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+    }
+
+    case WM_HSCROLL: {
+        HWND hScrollWnd = (HWND)lParam;
+        if (hScrollWnd == s_hStepEditTrackbar) {
+            int pos = (int)SendMessageA(s_hStepEditTrackbar, TBM_GETPOS, 0, 0);
+            if (pos < 0) pos = 0;
+            if (pos > 100) pos = 100;
+            s_StepEditCurrentTol = pos;
+
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Transparency Tolerance: %d", pos);
+            SetWindowTextA(s_hStepEditTolLabel, buf);
+
+            if (pos > 0) {
+                SendMessageA(s_hStepEditCheckMask, BM_SETCHECK, BST_CHECKED, 0);
+            } else {
+                SendMessageA(s_hStepEditCheckMask, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+
+            InvalidateRect(s_hStepEditCanvas, NULL, FALSE);
+            UpdateWindow(s_hStepEditCanvas);
+        }
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        WORD id = LOWORD(wParam);
+        WORD code = HIWORD(wParam);
+
+        if (id == ID_STEPEDIT_CHECK_MASK && (code == BN_CLICKED || code == 0)) {
+            LRESULT state = SendMessageA(s_hStepEditCheckMask, BM_GETCHECK, 0, 0);
+            if (state == BST_CHECKED) {
+                int pos = (int)SendMessageA(s_hStepEditTrackbar, TBM_GETPOS, 0, 0);
+                if (pos <= 0) {
+                    pos = 25;
+                    SendMessageA(s_hStepEditTrackbar, TBM_SETPOS, TRUE, 25);
+                }
+                s_StepEditCurrentTol = pos;
+            } else {
+                s_StepEditCurrentTol = 0;
+                SendMessageA(s_hStepEditTrackbar, TBM_SETPOS, TRUE, 0);
+            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Transparency Tolerance: %d", s_StepEditCurrentTol);
+            SetWindowTextA(s_hStepEditTolLabel, buf);
+
+            InvalidateRect(s_hStepEditCanvas, NULL, FALSE);
+            UpdateWindow(s_hStepEditCanvas);
+            return 0;
+        }
+
+        if (id == IDOK) {
+            StepEdit_ApplyChromaTolerance(s_StepEditIndex, s_StepEditCurrentTol);
+            RefreshListView();
+            s_StepEditDlgRunning = FALSE;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        if (id == IDCANCEL) {
+            s_StepEditDlgRunning = FALSE;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        return 0;
+    }
+
+    case WM_CLOSE:
+        s_StepEditDlgRunning = FALSE;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
+static BOOL RegisterStepEditClasses(HINSTANCE hInstance) {
+    static BOOL s_registered = FALSE;
+    if (s_registered) return TRUE;
+
+    HINSTANCE hInst = hInstance ? hInstance : GetModuleHandleA(NULL);
+
+    INITCOMMONCONTROLSEX icc;
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_BAR_CLASSES;
+    InitCommonControlsEx(&icc);
+
+    WNDCLASSEXA wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = StepEditDlgProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "TTP_StepEditDlg";
+    if (!RegisterClassExA(&wc)) {
+        if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return FALSE;
+    }
+
+    WNDCLASSEXA wcCanvas = {0};
+    wcCanvas.cbSize = sizeof(wcCanvas);
+    wcCanvas.style = CS_HREDRAW | CS_VREDRAW;
+    wcCanvas.lpfnWndProc = PreviewCanvasWndProc;
+    wcCanvas.hInstance = hInst;
+    wcCanvas.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wcCanvas.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+    wcCanvas.lpszClassName = "TTP_PreviewCanvas";
+    if (!RegisterClassExA(&wcCanvas)) {
+        if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return FALSE;
+    }
+
+    s_registered = TRUE;
+    return TRUE;
+}
+
+static void ShowStepEditDialog(HWND hParent, int stepIndex) {
+    if (stepIndex < 0 || stepIndex >= (int)g_stepCount) return;
+
+    HINSTANCE hInst = g_hInstance ? g_hInstance : GetModuleHandleA(NULL);
+    RegisterStepEditClasses(hInst);
+
+    s_StepEditIndex = stepIndex;
+    s_StepEditCurrentTol = (int)g_steps[stepIndex].chromaTol;
+    s_StepEditDlgRunning = TRUE;
+
+    RECT rcParent;
+    int posX = 100, posY = 100;
+    if (hParent && GetWindowRect(hParent, &rcParent)) {
+        posX = rcParent.left + (rcParent.right - rcParent.left - 380) / 2;
+        posY = rcParent.top + (rcParent.bottom - rcParent.top - 460) / 2;
+    } else {
+        posX = (GetSystemMetrics(SM_CXSCREEN) - 380) / 2;
+        posY = (GetSystemMetrics(SM_CYSCREEN) - 460) / 2;
+    }
+    if (posX < 0) posX = 50;
+    if (posY < 0) posY = 50;
+
+    HWND hDlg = CreateWindowExA(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        "TTP_StepEditDlg", "Edit Step Details & Chromakey Mask",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        posX, posY, 380, 460,
+        hParent, NULL, hInst, NULL
+    );
+
+    if (hParent) EnableWindow(hParent, FALSE);
+    MSG msg;
+    while (s_StepEditDlgRunning && GetMessageA(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            SendMessageA(hDlg, WM_COMMAND, IDCANCEL, 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+            SendMessageA(hDlg, WM_COMMAND, IDOK, 0);
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+    if (hParent) {
+        EnableWindow(hParent, TRUE);
+        SetActiveWindow(hParent);
+    }
+}
+
+
+/* =========================================================================
  * 7. Window Layout & Collapsible Drawer
  * ========================================================================= */
 
@@ -1961,8 +2442,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 } else if (pia->iSubItem == 4) {
                     ShowTimeoutPolicyMenu(hwnd, pia->iItem);
                     return 0;
+                } else {
+                    ShowStepEditDialog(hwnd, pia->iItem);
+                    return 0;
                 }
             }
+        }
+        if (pnmh->idFrom == ID_LV_STEPS && pnmh->code == NM_RCLICK) {
+            LPNMITEMACTIVATE pia = (LPNMITEMACTIVATE)lParam;
+            int idx = pia->iItem;
+            if (idx < 0) {
+                LVHITTESTINFO hti;
+                GetCursorPos(&hti.pt);
+                ScreenToClient(g_hListView, &hti.pt);
+                idx = ListView_HitTest(g_hListView, &hti);
+            }
+            if (idx >= 0 && idx < (int)g_stepCount) {
+                ListView_SetItemState(g_hListView, idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                POINT pt;
+                GetCursorPos(&pt);
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuA(hMenu, MF_STRING, ID_STEPEDIT_EDIT_MENU, "Edit Step Details & Chromakey Mask...");
+                AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuA(hMenu, (idx > 0) ? MF_STRING : (MF_STRING | MF_GRAYED), ID_BTN_MOVE_UP, "Move Up");
+                AppendMenuA(hMenu, (idx + 1 < (int)g_stepCount) ? MF_STRING : (MF_STRING | MF_GRAYED), ID_BTN_MOVE_DOWN, "Move Down");
+                AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuA(hMenu, MF_STRING, ID_BTN_DEL_STEP, "Delete Step");
+
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+                DestroyMenu(hMenu);
+                if (cmd == ID_STEPEDIT_EDIT_MENU) {
+                    ShowStepEditDialog(hwnd, idx);
+                } else if (cmd == ID_BTN_MOVE_UP || cmd == ID_BTN_MOVE_DOWN || cmd == ID_BTN_DEL_STEP) {
+                    SendMessageA(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
+                }
+            }
+            return 0;
         }
         break;
     }
@@ -2365,7 +2880,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXA wc = {0};
