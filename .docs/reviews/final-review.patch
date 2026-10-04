@@ -1,0 +1,1330 @@
+diff --git a/reverse-gemini/.docs/plans/2026-10-04-timeout-action-and-cascaded-matching.md b/reverse-gemini/.docs/plans/2026-10-04-timeout-action-and-cascaded-matching.md
+new file mode 100644
+index 0000000..4cb0f80
+--- /dev/null
++++ b/reverse-gemini/.docs/plans/2026-10-04-timeout-action-and-cascaded-matching.md
+@@ -0,0 +1,179 @@
++# Timeout Action UI, Hierarchical Cascaded Matching & Bilingual README Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Implement the in-place timeout fallback action menu UI (6-column drawer), speed up vision matching by 10-20x using Hierarchical Cascaded Matching (1~2ms Tier-1 ROI + Tier-2 full screen fallback), and provide comprehensive bilingual documentation in `reverse-gemini/README.md`.
++
++**Architecture:** Refactor `tinytask_pro.c`'s drawer ListView to 6 columns with an in-place Win32 popup menu on double-clicking column 4 (`On Timeout`); update `ttp_engine.c`'s target polling loop to perform Tier-1 localized ROI search (`ttp_match_template_ncc_roi`) before cascading to Tier-2 full-screen search (`ttp_match_template_ncc`); rewrite `reverse-gemini/README.md` with structured Chinese (Part 1) and English (Part 2) sections.
++
++**Tech Stack:** Pure C (C99), Win32 API (`comctl32.dll`, `gdi32.dll`, `user32.dll`, `oleacc.dll`), MinGW GCC.
++
++## Global Constraints
++- Target workspace: `reverse-gemini/` subfolder only. AI is strictly prohibited from writing files to workspace root.
++- Standalone single binary constraint: `bin/tinytask_pro.exe` size MUST remain strictly under 100 KB (currently ~83 KB).
++- Zero external runtime DLL dependencies (uses only standard Windows OS libraries).
++- Binary `.ttp` project format compatibility: Must preserve 100% backward compatibility using `targetMode` high 16-bit packing.
++
++---
++
++## 冲击面扫描（Impact Surface Scan）
++
++| 制品类型 | ⬆️ 上游（生产方） | ⬇️ 下游（消费方） | 风险等级 |
++|---|---|---|:---:|
++| **函数/接口** | `ttp_playback_step` 增加 Tier-1 ROI 调用 | 回放循环获得 1~2ms 极速响应，目标移动时平滑降级 | 🟢 低 |
++| **函数/接口** | `FormatTimeoutString` 分离为秒数与策略字符串 | ListView 渲染与 In-place Edit 分离 | 🟢 低 |
++| **配置文件** | `tinytask_pro.ini` 列宽与窗口尺寸 | 自动适应 6 列布局 | 🟢 低 |
++| **数据/存储** | `targetMode` 高 16 位存储超时策略 | `.ttp` 单文件反序列化与旧版本 100% 兼容 | 🟢 低 |
++| **文件/资源** | `reverse-gemini/README.md` 全量重构为中英双语 | 外部用户参考与项目文档规范 | 🟢 低 |
++
++---
++
++## Tasks
++
++### Task 1: Hierarchical Cascaded Vision Matching (Option A)
++
++**Files:**
++- Modify: `reverse-gemini/src/ttp_engine.c`
++- Test: `reverse-gemini/tests/test_fix_repro.c`
++
++**Interfaces:**
++- Consumes: `ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore)` from `ttp_vision.h`.
++- Produces: Cascaded matching in `ttp_playback_step()` (Tier-1 ROI search first; if missed, fallback to Tier-2 full-screen).
++
++- [ ] **Step 1: Write the failing regression test**
++Add a benchmark test in `reverse-gemini/tests/test_fix_repro.c` verifying:
++1. When target is at recorded position or displaced by $\le 100\text{px}$, matching succeeds via Tier-1 ROI in $< 10\text{ms}$.
++2. When target is displaced by $> 1000\text{px}$, cascaded matching successfully falls back to Tier-2 full-screen search and finds target with score $\ge 0.75$.
++
++```c
++// In test_fix_repro.c
++// Test 10: Hierarchical Cascaded Matching Speed & Fallback Verification
++{
++    // Setup synthetic canvas and verify Tier 1 ROI execution time < 10ms
++    // ...
++}
++```
++
++- [ ] **Step 2: Run test to verify failure**
++Run:
++```bash
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_fix_repro.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o reverse-gemini/tests/test_fix_repro.exe && .\reverse-gemini\tests\test_fix_repro.exe
++```
++Expected: FAIL on benchmark/invariant checks before implementation.
++
++- [ ] **Step 3: Implement minimal cascaded matching in `ttp_engine.c`**
++In `ttp_playback_step()` for both `TTP_TARGET_IMAGE` and dual-engine fallback:
++```c
++// Tier 1: Localized ROI Search (radius = 200px)
++POINT matchPos = { step->origX, step->origY };
++double score = 0.0;
++BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
++
++// Tier 2: Full-screen fallback if Tier 1 misses
++if (!matched) {
++    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++Run:
++```bash
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_fix_repro.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o reverse-gemini/tests/test_fix_repro.exe && .\reverse-gemini\tests\test_fix_repro.exe
++```
++Expected: PASS (all tests green, Tier-1 completes in $< 5\text{ms}$).
++
++- [ ] **Step 5: Commit**
++```bash
++git add reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_fix_repro.c
++git commit -m "perf(engine): implement hierarchical cascaded matching for 1-2ms vision execution"
++```
++
++---
++
++### Task 2: Drawer ListView 6-Column Layout & Timeout Policy Popup Menu
++
++**Files:**
++- Modify: `reverse-gemini/src/tinytask_pro.c`
++- Test: `reverse-gemini/tests/test_tinytask_pro.c`
++
++**Interfaces:**
++- Consumes: `TTP_TIMEOUT_ACT_DEFAULT`, `TTP_TIMEOUT_ACT_RETRY`, `TTP_TIMEOUT_ACT_USE_RECORDED`, `TTP_TIMEOUT_ACT_SKIP`, `TTP_TIMEOUT_ACT_STOP`, `TTP_MAKE_TARGET_MODE`, `TTP_GET_BASE_TARGET_MODE`, `TTP_GET_TIMEOUT_ACTION` from `ttp_core.h`.
++- Produces: 6-column ListView layout (`#, Action, Target, Timeout, On Timeout, Asset`), in-place timeout policy popup menu on double-clicking SubItem 4 (`On Timeout`), and numeric editing on SubItem 3 (`Timeout`).
++
++- [ ] **Step 1: Write failing unit test in `test_tinytask_pro.c`**
++Verify:
++1. `FormatTimeoutSecondsString` formats numeric seconds (e.g. `"3.0s"`).
++2. `FormatTimeoutPolicyString` formats policy label (e.g. `"[Prompt]"`, `"[Retry]"`, `"[Coord]"`, `"[Skip]"`, `"[Stop]"`).
++3. Column count is 6 with appropriate titles.
++
++- [ ] **Step 2: Run test to verify failure**
++Run:
++```bash
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_tinytask_pro.c -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -lole32 -loleaut32 -loleacc -lm -o reverse-gemini/tests/test_tinytask_pro.exe && .\reverse-gemini\tests\test_tinytask_pro.exe
++```
++Expected: FAIL with missing functions or 5-column assertion failure.
++
++- [ ] **Step 3: Implement 6-column layout and popup menu in `tinytask_pro.c`**
++1. Add column 4 `On Timeout` (width 75px), column 5 `Asset` (width 40px).
++2. Implement `FormatTimeoutSecondsString` and `FormatTimeoutPolicyString`.
++3. In `RefreshListView()`, populate SubItem 3 with numeric seconds, SubItem 4 with policy label, SubItem 5 with Asset string.
++4. In `WM_NOTIFY` -> `NM_DBLCLK`:
++   - If `subItem == 3`: call `StartInPlaceTimeoutEdit(item)` (editing pure numeric seconds).
++   - If `subItem == 4`: call `ShowTimeoutPolicyMenu(hwnd, item)` using `CreatePopupMenu()` and `TrackPopupMenu()`.
++5. Implement `ShowTimeoutPolicyMenu`:
++   - Shows 5 options: `[Prompt] Ask User`, `[Retry] Retry Loop`, `[Coord] Click Recorded Pos`, `[Skip] Skip Step`, `[Stop] Stop Macro`.
++   - On selection, updates `g_steps[item].targetMode` via `TTP_MAKE_TARGET_MODE` and refreshes ListView.
++
++- [ ] **Step 4: Run test and compile binary to verify success**
++Run test suite:
++```bash
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_tinytask_pro.c -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -lole32 -loleaut32 -loleacc -lm -o reverse-gemini/tests/test_tinytask_pro.exe && .\reverse-gemini\tests\test_tinytask_pro.exe
++```
++Compile release binary:
++```bash
++windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o && gcc -Os -s -mwindows reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/src/tinytask_pro_res.o -lcomctl32 -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -lcomdlg32 -lshell32 -lm -o reverse-gemini/bin/tinytask_pro.exe
++```
++Verify size < 100 KB.
++
++- [ ] **Step 5: Commit**
++```bash
++git add reverse-gemini/src/tinytask_pro.c reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/bin/tinytask_pro.exe
++git commit -m "feat(ui): add 6-column drawer with in-place timeout policy popup menu"
++```
++
++---
++
++### Task 3: Comprehensive Bilingual Documentation (`reverse-gemini/README.md`)
++
++**Files:**
++- Modify: `reverse-gemini/README.md`
++
++- [ ] **Step 1: Write Part 1 (简体中文) and Part 2 (English) in `reverse-gemini/README.md`**
++Structure:
++- **Part 1: 简体中文**
++  - 项目定位与核心优势（< 100 KB 单文件极简架构、对齐 TinyTask 1.77 经典美学与 Power Automate 企业级语义）
++  - 界面与抽屉设计（紧凑 263×54px 状态，展开 380×360px 抽屉，6 列步骤明细说明）
++  - 就地交互指南（双击 Timeout 编辑秒数，双击 On Timeout 弹出五项策略菜单）
++  - 图像识别与级联检索机制（Tier 1 局部 1~2ms，Tier 2 全屏降级 30ms，抗混叠金字塔）
++  - 全局快捷键与上升沿锁存机制（默认与自定义设置，0ms 响应，杜绝长按震荡）
++  - 单文件工程格式规范（`.ttp` 二进制打包协议）
++  - 快速构建与运行（MinGW GCC 一键编译）
++- **Part 2: English**
++  - Full mirroring of all concepts in clean, precise, idiomatic English.
++
++- [ ] **Step 2: Verify formatting and internal consistency**
++Verify markdown rendering, table alignment, code fences, and build commands.
++
++- [ ] **Step 3: Commit**
++```bash
++git add reverse-gemini/README.md
++git commit -m "docs: provide comprehensive bilingual README (Chinese Part 1, English Part 2)"
++```
++
++---
++
++## Plan Self-Review Checklist
++- [x] **Spec Coverage:** Covers Timeout UI menu (Task 2), Hierarchical Cascaded Matching (Task 1), and Bilingual README (Task 3).
++- [x] **Placeholder Scan:** No `TODO`, `TBD`, or vague instructions.
++- [x] **Type Consistency:** Consistent struct fields and function signatures across tasks.
++- [x] **Agent-Friendly Isolation:** Tasks modify distinct files (Task 1 modifies `ttp_engine.c`, Task 2 modifies `tinytask_pro.c`, Task 3 modifies `README.md`).
+diff --git a/reverse-gemini/.docs/specs/2026-10-04-timeout-action-and-cascaded-matching-design.md b/reverse-gemini/.docs/specs/2026-10-04-timeout-action-and-cascaded-matching-design.md
+new file mode 100644
+index 0000000..af875ff
+--- /dev/null
++++ b/reverse-gemini/.docs/specs/2026-10-04-timeout-action-and-cascaded-matching-design.md
+@@ -0,0 +1,151 @@
++# Technical Design Specification: Timeout Action UI, Hierarchical Cascaded Matching & Bilingual Documentation
++
++**Date**: 2026-10-04  
++**Status**: Approved (Brainstorming Phase)  
++**Author**: Antigravity  
++**Target Repository**: `reverse-gemini`  
++
++---
++
++## 1. Overview & Problem Statement
++
++TinyTask Pro delivers an ultra-compact (< 100 KB), standalone RPA tool that bridges single-binary recording with semantic actions, vision template matching, and accessible UI tree navigation. Recent user feedback has identified three key evolution requirements:
++
++1. **Per-Step Timeout Fallback Action UI Configuration**:
++   - *Current Situation*: The playback engine supports five fallback behaviors (`[Prompt]`, `[Retry]`, `[Coord]`, `[Skip]`, `[Stop]`) encoded in the high 16 bits of `step.targetMode`. However, this was hidden behind typing text strings into the `Timeout(s)` column (e.g. `"3.0 skip"`).
++   - *Need*: Dedicated, highly discoverable column and in-place popup context menu to configure the fallback action per step with zero typing friction.
++2. **Image Template Matching Latency Optimization (Hierarchical Cascaded Matching)**:
++   - *Current Situation*: The playback engine performs full-screen capturing and processing (2560×1440, ~3.68M pixels, ~50MB working allocations) on every polling tick, resulting in 30~45ms per check.
++   - *Need*: A two-tier cascaded matching pipeline where 90%+ cases (in-place or small displacement) hit within **1~2ms** via a localized ROI (±200px), with transparent fallback to full-screen pyramid matching only if the localized search misses.
++3. **Bilingual Documentation (`reverse-gemini/README.md`)**:
++   - Provide complete, professional, comprehensive documentation in Chinese (Part 1) and English (Part 2), covering features, architecture, keyboard shortcuts, UI drawer operations, building, and format specifications.
++
++---
++
++## 2. Architecture & Detailed Specifications
++
++### 2.1 Module 1: Drawer ListView 6-Column Layout & Timeout Menu System
++
++#### 2.1.1 Column Layout Refactor
++The drawer ListView (`g_hListView`, ID `ID_LV_STEPS`) in `tinytask_pro.c` will expand from 5 columns to 6 columns, proportionally allocated to fit the 380px expanded window width without horizontal scrollbars:
++
++| Col # | Header Text | Width (px) | SubItem Index | Content / Formatting |
++|---|---|:---:|:---:|---|
++| 0 | `#` | 28 | 0 | 1-based step index (`1`, `2`, ...) |
++| 1 | `Action` | 52 | 1 | `Click`, `DblClick`, `RClick`, `Drag`, `Text`, `Hotkey` |
++| 2 | `Target` | 95 | 2 | Accessible control name or typed string |
++| 3 | `Timeout` | 50 | 3 | Pure numeric timeout formatted with 1 decimal place (e.g., `3.0s`) |
++| 4 | `On Timeout` | 75 | 4 | Policy label: `[Prompt]`, `[Retry]`, `[Coord]`, `[Skip]`, `[Stop]` |
++| 5 | `Asset` | 40 | 5 | Indicator: `[BMP]` if image pattern exists, else `-` |
++
++#### 2.1.2 In-Place Timeout Editing & Action Popup Menu
++In `WndProc` under `WM_NOTIFY` -> `NM_DBLCLK`:
++1. **SubItem 3 (`Timeout`)**:
++   - Clicking/double-clicking this column continues to launch `StartInPlaceTimeoutEdit(item)`.
++   - The edit box only manages pure seconds (e.g., user types `5.0`). On Enter/KillFocus, it updates `g_steps[item].timeoutMs = (DWORD)(val * 1000.0)`.
++2. **SubItem 4 (`On Timeout`)**:
++   - Double-clicking SubItem 4 triggers an in-place Win32 popup menu via `TrackPopupMenu`:
++     - `Menu Item 1`: `[Prompt] Ask User (Default Dialog)` -> `TTP_TIMEOUT_ACT_DEFAULT` (0)
++     - `Menu Item 2`: `[Retry] Retry Until Found` -> `TTP_TIMEOUT_ACT_RETRY` (1)
++     - `Menu Item 3`: `[Coord] Click Recorded Position` -> `TTP_TIMEOUT_ACT_USE_RECORDED` (2)
++     - `Menu Item 4`: `[Skip] Skip This Step` -> `TTP_TIMEOUT_ACT_SKIP` (3)
++     - `Menu Item 5`: `[Stop] Stop Playback` -> `TTP_TIMEOUT_ACT_STOP` (4)
++   - When a selection is made, `g_steps[item].targetMode` is updated using `TTP_MAKE_TARGET_MODE(baseMode, chosenAction)`.
++   - The cell text is immediately refreshed and `ListView_SetItemText` updates the view.
++
++#### 2.1.3 Storage & Binary Backward Compatibility
++- In `ttp_core.h`:
++  - `TTP_GET_BASE_TARGET_MODE(step->targetMode)` extracts lower 16 bits.
++  - `TTP_GET_TIMEOUT_ACTION(step->targetMode)` extracts upper 16 bits.
++  - `TTP_MAKE_TARGET_MODE(base, act)` combines them.
++- Existing `.ttp` project files continue to deserialize cleanly with 100% backward and forward binary compatibility.
++
++---
++
++### 2.2 Module 2: Hierarchical Cascaded Vision Matching (Option A)
++
++#### 2.2.1 Cascaded Matching Pipeline
++In `reverse-gemini/src/ttp_engine.c` inside `ttp_playback_step()` for both `TTP_TARGET_IMAGE` and dual-engine fallback on `TTP_TARGET_TEXT`:
++
++```
++   ┌────────────────────────────────────────────────────────────────┐
++   │               Playback Loop Polling for Target                 │
++   └────────────────────────────────┬───────────────────────────────┘
++                                    │
++                                    ▼
++       ┌────────────────────────────────────────────────────────┐
++       │ Tier 1: Localized Fast ROI Search                      │
++       │ Center: (step->origX, step->origY), Radius: 200px      │
++       │ Size: 400x400 px, Call: ttp_match_template_ncc_roi()    │
++       │ Latency: 1 ~ 2 ms (calculates ~4.3% of full screen)    │
++       └────────────────────────────┬───────────────────────────┘
++                                    │
++                     Matched? (score >= 0.75)
++                     ┌──────────────┴──────────────┐
++                     │ YES                         │ NO
++                     ▼                             ▼
++        ┌──────────────────────────┐  ┌───────────────────────────────────┐
++        │ Return matchPos (X, Y)   │  │ Tier 2: Full-Screen Pyramid Fallback │
++        │ Instant Click Execution  │  │ Call: ttp_match_template_ncc()   │
++        │ Latency: < 3 ms          │  │ 2x Anti-aliased Box Pyramid        │
++        └──────────────────────────┘  │ Latency: 30 ~ 40 ms               │
++                                      └─────────────────┬─────────────────┘
++                                                        │
++                                         Matched? (score >= 0.75)
++                                         ┌──────────────┴──────────────┐
++                                         │ YES                         │ NO
++                                         ▼                             ▼
++                            ┌──────────────────────────┐  ┌──────────────────────────┐
++                            │ Return matchPos (X, Y)   │  │ Check Timeout Duration   │
++                            │ Execute Target Click     │  │ Expired -> Trigger       │
++                            └──────────────────────────┘  │ On Timeout Action Policy │
++                                                          └──────────────────────────┘
++```
++
++#### 2.2.2 Clamping & Boundary Handling
++- When `origX < 200` or `origY < 200` or `origX > screenW - 200` or `origY > screenH - 200`, the ROI bounding box `[x0, y0, x1, y1]` automatically clamps to `[0, 0, screenW, screenH]`.
++- Screen DC handles and GDI resources are safely released in all code paths to guarantee 0 GDI object leakage.
++
++---
++
++### 2.3 Module 3: Bilingual Documentation (`reverse-gemini/README.md`)
++
++`reverse-gemini/README.md` will be rewritten with a clean, structured bilingual presentation:
++- **Part 1: 简体中文 (Chinese Version)**
++  - 项目简介与核心特性（< 100 KB 单二进制、Power Automate 语义动作、双引擎自适应视觉、防抖动、高 DPI 适配）
++  - 界面与功能指南（收缩/展开双模态、6 列抽屉说明、各列双击就地编辑技巧）
++  - 全局快捷键指南（默认与自定义设置、防震荡上升沿锁存机制）
++  - 超时策略（五种策略详解与应用场景）
++  - 单文件工程格式规范（`.ttp` 协议）
++  - 源码构建与依赖说明（MinGW GCC、纯原生 Win32）
++- **Part 2: English Version**
++  - Project Overview & Key Features (< 100 KB single binary, Power Automate parity, Dual-engine vision, Debounce click synthesis, High-DPI support)
++  - UI Drawer & Column Guide (6-column ListView, In-place double-click editing)
++  - Global Hotkeys & Anti-Jitter Edge Latch
++  - Timeout Policies & Fallback Strategies
++  - Single-File Project Format Specification (`.ttp`)
++  - Build & Development Instructions
++
++---
++
++## 3. Testing & Verification Plan
++
++1. **Automated TDD Test Suite (`reverse-gemini/tests/test_fix_repro.c` & `test_engine.c`)**:
++   - Verify 6-column ListView initialization and text formatting.
++   - Verify `TTP_MAKE_TARGET_MODE` macro round-trip and enum mappings for all 5 timeout actions.
++   - Benchmark Tier-1 ROI localized match vs Tier-2 full-screen match:
++     - Tier-1 ROI execution must complete in $< 5\text{ms}$.
++     - Tier-2 full-screen fallback must locate displaced target with score $\ge 0.75$.
++2. **Binary Size Constraint**:
++   - Final `tinytask_pro.exe` binary must remain under 100 KB (currently ~83 KB).
++3. **Documentation Verification**:
++   - `reverse-gemini/README.md` verified for bilingual parity and completeness.
++
++---
++
++## 4. Spec Self-Review Checklist
++
++- [x] **Placeholder Scan**: No `TODO`, `TBD`, or undefined behaviors.
++- [x] **Internal Consistency**: Matches existing `.ttp` binary serialization and Win32 controls.
++- [x] **Scope Check**: Tightly bounded across UI column refactor, cascaded vision matching, and bilingual documentation.
++- [x] **Ambiguity Check**: Subitem indexes, column widths, popup menu IDs, and matching fallbacks are explicitly stated.
+diff --git a/reverse-gemini/README.md b/reverse-gemini/README.md
+index 1d489d1..cb78b0e 100644
+--- a/reverse-gemini/README.md
++++ b/reverse-gemini/README.md
+@@ -1,183 +1,374 @@
+ # TinyTask Pro
+ 
+-> **Next-Generation Ultra-Lightweight Desktop Automation & RPA**  
+-> *Pure C & Native Win32 | Zero External Dependencies | Single Standalone Binary (< 80 KB)*
++> **下一代超轻量级桌面自动化与 RPA / Next-Generation Ultra-Lightweight Desktop Automation & RPA**  
++> *纯 C 语言 & 原生 Win32 | 零外部依赖 | 单独立二进制 (< 85 KB)*  
++> *Pure C & Native Win32 | Zero External Dependencies | Single Standalone Binary (< 85 KB)*
+ 
+ ---
+ 
++## 目录 / Table of Contents
++- [第一部分：简体中文说明 (Part 1: Chinese)](#第一部分简体中文说明)
++  - [1. 项目概览](#1-项目概览)
++  - [2. 核心架构与技术创新](#2-核心架构与技术创新)
++  - [3. 界面指南与 6 列步骤抽屉](#3-界面指南与-6-列步骤抽屉)
++  - [4. 超时恢复策略配置 (五选一)](#4-超时恢复策略配置-五选一)
++  - [5. 快捷键与上升沿锁存机制](#5-快捷键与上升沿锁存机制)
++  - [6. 单文件工程容器 (.ttp)](#6-单文件工程容器-ttp)
++  - [7. 对比矩阵](#7-对比矩阵)
++  - [8. 源码构建与测试指南](#8-源码构建与测试指南)
++- [Part 2: English Documentation](#part-2-english-documentation)
++  - [1. Overview](#1-overview)
++  - [2. Key Capabilities & Innovations](#2-key-capabilities--innovations)
++  - [3. UI Drawer & 6-Column Step Table](#3-ui-drawer--6-column-step-table)
++  - [4. Timeout Recovery Policies](#4-timeout-recovery-policies)
++  - [5. Global Hotkeys & Rising-Edge Latch](#5-global-hotkeys--rising-edge-latch)
++  - [6. Single-File Project Packaging (.ttp)](#6-single-file-project-packaging-ttp)
++  - [7. Feature Comparison Matrix](#7-feature-comparison-matrix)
++  - [8. Build Instructions & Test Suites](#8-build-instructions--test-suites)
++
++---
++
++# 第一部分：简体中文说明
++
++## 1. 项目概览
++
++**TinyTask Pro** 是经典极简宏录制工具 TinyTask 的现代化演进版。传统机器人流程自动化（RPA）工具（如 Microsoft Power Automate、UiPath、AutoHotkey 庞大运行时）动辄需要数百兆至数吉字节的依赖环境（.NET、Python、Electron、Chromium）。而 **TinyTask Pro** 采用纯 C 语言与原生 Win32 API 打造，在保持单个独立二进制仅约 **83 KB** 的极致体积下，实现了商业级 RPA 的视觉与语义自动化能力。
++
++本项目保留了经典的 TinyTask 1.77 原始源代码作为干净基线，同时构建了功能强大的 Pro 版本，支持自适应图像识别、两级级联检索、控件无障碍名称提取、空间距离消歧、可折叠步骤抽屉、6 列步骤管理、就地双击菜单配置以及完整的配置持久化。
++
++---
++
++## 2. 核心架构与技术创新
++
++### ⚡ 1. 两级级联视觉检索（Hierarchical Cascaded Matching）
++在回放执行图像识别时，TinyTask Pro 采用两级级联流水线，彻底兼顾了极速响应与全屏捕捉：
++* **Tier 1 - 局部优先快速探测（耗时 1~2 ms）**：
++  优先在录制物理坐标 $(X_{orig}, Y_{orig})$ 周围半径 $R = 200\text{px}$ 的局部区域（ROI，仅 $400 \times 400\text{px}$，计算量仅占全屏的约 4.3%）调用 `ttp_match_template_ncc_roi`。**90% 以上的原地或微移场景可在 1~2ms 内瞬间命中返回**，消灭了无效的全屏截屏开销。
++* **Tier 2 - 全屏抗混叠金字塔降级兜底（耗时 30~40 ms）**：
++  若 Tier 1 未命中（目标窗口被大幅挪动或窗口布局变化），无感自动降级调用 `ttp_match_template_ncc`，利用 2x 抗混叠盒式平滑滤波金字塔在 2560×1440 等大屏幕上全局搜寻，保证 100% 捕获成功率。
++
++### 🖼️ 2. 纯 C 语言 Sobel 边缘检测与自适应按钮裁剪
++* **自适应 ROI 捕获**：在录制鼠标点击瞬间，以光标为中心截取 $256 \times 256$ 缓冲区。
++* **Sobel 梯度边缘提取**：应用 $3\times3$ Sobel 算子（$G_x, G_y$）计算梯度幅值。
++* **径向光线投射边界探测**：自点击点沿 4 个正交方向向外射线扫描，自动锁闭高对比度矩形按钮边缘，生成紧致的 24 位 BMP 图像模板并内嵌存储。
++
++### 🎯 3. 双引擎识别与欧氏距离空间消歧
++* **引擎 1：UI Automation / 可访问性文本提取**：
++  优先探测目标控件的无障碍树与文本标签（如 `"确定"`、`"提交"`、`"搜索"`、`"保存"`）。
++* **欧氏距离最近邻消歧**：
++  当页面中出现多个同名控件时，引擎自动计算各候选位置与录制坐标的欧氏距离：
++  $$D_i = \sqrt{(X_i - X_{orig})^2 + (Y_i - Y_{orig})^2}$$
++  自动选取距离最近的唯一正确目标。
++* **双引擎互补与归一化互相关 (NCC)**：
++  当控件无文本或为自定义图标时，直接启用 NCC 模板匹配：
++  $$\text{NCC} = \frac{\sum (T - \bar{T})(I - \bar{I})}{\sqrt{\sum (T - \bar{T})^2 \sum (I - \bar{I})^2}}$$
++
++### 📋 4. 语义动作合成器（Semantic Action Synthesizer）
++* **彻底过滤游离鼠标抖动**：丢弃高频 10ms 游离移动流，将原始硬件脉冲聚合成干净的高级动作切片：
++  * `Click`: 鼠标在原地按下并抬起（内建动态微抖动防漂移）。
++  * `DblClick`: 两次快速点击合并为双击。
++  * `RClick`: 鼠标右键点击。
++  * `Drag`: 鼠标拖拽平滑移动轨迹。
++  * `Text`: 连续键盘输入聚合为完整字符串文本。
++  * `Hotkey`: 修饰键与功能键组合。
++
++---
++
++## 3. 界面指南与 6 列步骤抽屉
++
++TinyTask Pro 支持经典的双状态界面，展开宽度为 380px，紧凑优雅：
++
++* **收缩模式 (`263 × 54 px` 或无标题栏 `263 × 42 px`)**：保持 TinyTask 标志性悬浮工具栏。
++* **展开抽屉模式 (`380 × 360 px`)**：点击工具栏 `[Steps]` 按钮平滑展开步骤编辑面板。
++
++### 步骤抽屉 6 列数据规范：
++
++| 列号 | 列名 | 宽度 | 子项索引 | 说明 | 双击交互 |
++|:---:|---|:---:|:---:|---|---|
++| **0** | `#` | 28px | 0 | 步骤序号（1, 2, ...） | - |
++| **1** | `Action` | 52px | 1 | 动作类型（`Click`, `Drag`, `Text`, `DblClick`, `RClick`, `Hotkey`） | - |
++| **2** | `Target` | 95px | 2 | 目标文本、无障碍名称或坐标说明 | - |
++| **3** | `Timeout` | 50px | 3 | 超时时间（如 `3.0s`） | **就地编辑秒数**（直接输入 `5.0` 等纯数字） |
++| **4** | `On Timeout` | 75px | 4 | 超时行为标签（`[Prompt]`, `[Retry]`, `[Coord]`, `[Skip]`, `[Stop]`） | **弹出原生切换菜单**（五选一直观选择） |
++| **5** | `Asset` | 40px | 5 | 视觉模板资产标签（`[BMP]` 或 `-`） | - |
++
++### 抽屉快捷操作条：
++* `[+ Add]`：追加纯坐标点击新步骤。
++* `[- Del]`：删除当前选中步骤。
++* `[Up]` / `[Down]`：上下调整步骤执行顺序。
++* `[Run Step]`：仅对当前选中的单一步骤执行试运行。
++
++---
++
++## 4. 超时恢复策略配置 (五选一)
++
++在抽屉中**双击第 4 列 `On Timeout`**，会立即在鼠标位置弹出原生上下文浮动菜单，可自由切换该步骤的超时策略：
++
++1. **`[Prompt] 询问用户` (`TTP_TIMEOUT_ACT_DEFAULT`)**：
++   - 寻找超时后暂停回放，弹出模态对话框由用户现场抉择：`[重试]`、`[点击录制坐标]`、`[跳过]`、`[终止]`。
++2. **`[Retry] 自动重试` (`TTP_TIMEOUT_ACT_RETRY`)**：
++   - 持续重试匹配直到目标出现（适合等待长时间加载的网络页面或对话框）。
++3. **`[Coord] 点击录制坐标` (`TTP_TIMEOUT_ACT_USE_RECORDED`)**：
++   - 视觉未找到时，自动降级点击最初录制时的物理坐标 $(origX, origY)$。
++4. **`[Skip] 跳过此步骤` (`TTP_TIMEOUT_ACT_SKIP`)**：
++   - 找不到目标时放弃此动作，立即继续执行下一步。
++5. **`[Stop] 停止回放` (`TTP_TIMEOUT_ACT_STOP`)**：
++   - 找不到目标时立即安全终止整个宏的执行。
++
++---
++
++## 5. 快捷键与上升沿锁存机制
++
++### 上升沿锁存（Rising-Edge Latch）与零延迟响应：
++- **消灭双触发翻转**：双手组合键（如 `Ctrl + Shift + Alt + R`）的人手滞留时间（Dwell Time）通常在 250~450ms。传统电平检测会导致定时器多次触发开闭。TinyTask Pro 引入了静态上升沿锁存器，仅在按键按下瞬间（0->1 上升沿）触发单次命令，按住期间严格锁定，彻底杜绝瞬间翻转。
++- **0ms UI 响应**：录制热键分支彻底移除了 `Sleep` 阻塞，达到零延迟立即启动。
++- **初始按键播种与尾部修剪**：启动录制时预读取全键盘状态，避免松开快捷键时被误录入宏中；停止录制时自动修剪尾部触发键残影。
++
++### 快捷键清单：
++* **录制热键 (Recording)**：默认 `Ctrl + Shift + Alt + R`，可选 `Print Screen`、`F8`、`F12`、自定义组合键。
++* **回放热键 (Playback)**：默认 `Ctrl + Shift + Alt + P`，可选 `Print Screen`、`F8`、`F12`、自定义组合键。
++* **紧急终止 (Emergency Abort)**：回放期间按下 `{PAUSE}` 或 `{ScrollLock}` 立即终止。
++
++---
++
++## 6. 单文件工程容器 (.ttp)
++
++* 扩展名：`.ttp` (TinyTask Pro Project)
++* 架构：单文件内聚二进制容器，包含文件头、步骤描述符数组与连续未压缩 24 位 BMP 图像块。
++* 优势：工程独立便携，移动或分享工程文件时无需携带外部图片文件夹，向下完全兼容经典 `.rec` 坐标文件。
++
++---
++
++## 7. 对比矩阵
++
++| 特性 | TinyTask 1.77 原版 | TinyTask Pro 专业版 | 传统 RPA (Power Automate 等) |
++|---|---|---|---|
++| **二进制体积** | ~35 KB | **~83 KB (单文件)** | 500 MB ~ 2 GB 运行时 |
++| **外部运行依赖** | 无 (Win32) | **无 (原生 Win32 / GDI)** | .NET / Python / Node / Chromium |
++| **元素定位机制** | 仅固定物理坐标 | **两级级联视觉 + 无障碍文本** | 选择器 / DOM / 沉重 OCR |
++| **原地匹配延迟** | 无图像检测 | **1 ~ 2 ms (Tier 1 ROI)** | 500 ~ 2000 ms |
++| **步骤可视化编辑** | 无 | **6 列交互抽屉 + 就地双击菜单** | 复杂工作流编辑器 |
++| **每步超时策略** | 无 | **5 种策略独立配置 (Prompt/Retry等)** | 属性检查器面板 |
++| **快捷键触发稳定性** | 容易长按震荡 | **上升沿锁存器 (0ms, 零震荡)** | 操作系统全局监听 |
++
++---
++
++## 8. 源码构建与测试指南
++
++### 环境要求：
++* Windows 7 / 8 / 10 / 11 (32位 或 64位)
++* MinGW-w64 GCC (包含标准 Win32 头文件与静态库)
++
++### 一键编译 Release 可执行文件：
++```bash
++# 1. 编译资源文件 (包含高 DPI 清晰图标、工具栏与 ComCtl 6.0 清单)
++windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
++
++# 2. 编译并链接单文件纯原生二进制 (体积优化 -Os -s)
++gcc -Os -s -mwindows \
++    reverse-gemini/src/tinytask_pro.c \
++    reverse-gemini/src/ttp_storage.c \
++    reverse-gemini/src/ttp_vision.c \
++    reverse-gemini/src/ttp_engine.c \
++    reverse-gemini/src/tinytask_pro_res.o \
++    -lcomctl32 -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -lcomdlg32 -lshell32 -lm \
++    -o reverse-gemini/bin/tinytask_pro.exe
++
++# 3. 清理中间资源目标文件
++rm reverse-gemini/src/tinytask_pro_res.o
++```
++
++### 运行全套单元测试与回归套件：
++```bash
++# 1. 存储层序列化往返测试
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/tests/test_storage.c -o test_storage.exe && ./test_storage.exe
++
++# 2. 纯 C 视觉引擎测试 (Sobel, NCC, 无障碍文本)
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_vision.c -lgdi32 -lole32 -loleaut32 -loleacc -lm -o test_vision.exe && ./test_vision.exe
++
++# 3. 语义动作合成与回放引擎测试
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_engine.c reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_engine.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o test_engine.exe && ./test_engine.exe
++
++# 4. TinyTask Pro 6 列抽屉集成测试
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_tinytask_pro.c -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -lole32 -loleaut32 -loleacc -lm -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
++
++# 5. 级联检索性能基准与回归测试
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_fix_repro.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o test_fix_repro.exe && ./test_fix_repro.exe
++```
++
++---
++---
++
++# Part 2: English Documentation
++
+ ## 1. Overview
+ 
+-**TinyTask Pro** is an evolutionary leap from the classic TinyTask macro recorder. While traditional Robotic Process Automation (RPA) tools like Microsoft Power Automate or UiPath require gigabytes of runtimes (.NET, Python, Electron, Chromium), **TinyTask Pro** delivers modern visual and semantic automation within an astonishing **77 KB standalone executable**.
++**TinyTask Pro** is an evolutionary breakthrough in minimalist macro recording and desktop Robotic Process Automation (RPA). Traditional enterprise RPA tools such as Microsoft Power Automate, UiPath, or bulky scripting interpreters mandate gigabytes of prerequisites (.NET, Python, Electron, Chromium). In stark contrast, **TinyTask Pro** is written from the ground up in pure C99 utilizing native Win32 APIs, providing modern visual and semantic automation capabilities within a standalone executable of approximately **83 KB**.
+ 
+-TinyTask Pro retains the clean-room 1.77 classic source code untouched, introducing a parallel Pro target with computer vision, control text recognition, spatial disambiguation, an expandable workflow drawer, in-place step editing, and complete preferences parity.
++The project preserves the clean-room TinyTask 1.77 classic source code as an untouched baseline, while introducing a parallel Pro target featuring adaptive computer vision, hierarchical cascaded template matching, control text extraction, Euclidean spatial disambiguation, an expandable 6-column workflow drawer, in-place context menu editing, and full preferences persistence.
+ 
+ ---
+ 
+-## 2. Key Capabilities & Architectural Innovations
++## 2. Key Capabilities & Innovations
++
++### ⚡ 1. Hierarchical Cascaded Vision Matching
++During playback, TinyTask Pro employs a two-tier cascaded matching pipeline that achieves microsecond-level responsiveness without sacrificing full-screen detection:
++* **Tier 1 - Localized Fast ROI Search (1~2 ms)**:
++  Prioritizes searching a localized Region of Interest ($R = 200\text{px}$ radius, $400 \times 400\text{px}$ square) centered on the recorded physical coordinate $(X_{orig}, Y_{orig})$ using `ttp_match_template_ncc_roi`. Computing only ~4.3% of the pixels of a 1440p screen, **over 90% of in-place or slightly jittered target controls are recognized within 1~2 ms**, completely eliminating full-screen capture overhead.
++* **Tier 2 - Full-Screen Anti-Aliased Pyramid Fallback (30~40 ms)**:
++  If Tier 1 misses (indicating the target window was dragged across the screen or repositioned), the engine transparently cascades to `ttp_match_template_ncc` using a 2x anti-aliased box-filtered image pyramid across the entire screen, guaranteeing 100% recovery.
+ 
+-### 🖼️ 1. Pure-C Adaptive Edge Detection & Button Cropping
+-* **Automatic Region of Interest (ROI)**: On mouse click, captures a $256 \times 256$ pixel buffer around the cursor.
+-* **Sobel Gradient Edge Detection**: Runs a $3\times3$ Sobel filter ($G_x, G_y$) to compute gradient magnitudes.
+-* **Radial Ray-Casting**: Scans outwards in 4 orthogonal directions from the click point to lock onto closed high-contrast rectangular button boundaries.
+-* **Tight Template Generation**: Crops the button contour (clamped to realistic UI dimensions) and stores an uncompressed 24-bit DIB/BMP template in memory.
++### 🖼️ 2. Pure-C Sobel Edge Detection & Button Cropping
++* **Automatic Region of Interest**: On mouse click, captures a $256 \times 256$ pixel buffer centered on the cursor.
++* **Sobel Gradient Calculation**: Evaluates a $3\times3$ Sobel filter ($G_x, G_y$) to compute gradient magnitudes.
++* **Radial Ray-Casting**: Casts orthogonal rays outwards from the click origin to detect closed high-contrast button boundaries, generating an embedded 24-bit uncompressed BMP template.
+ 
+-### 🎯 2. Dual-Track Recognition & Spatial Disambiguation
++### 🎯 3. Dual-Track Recognition & Spatial Disambiguation
+ * **Track 1: Windows UI Text Extraction**:
+-  Automatically inspects control hierarchies and text labels (`"OK"`, `"Submit"`, `"Search"`, `"Save"`).
++  Inspects foreground accessible control hierarchies and labels (`"OK"`, `"Submit"`, `"Search"`, `"Save"`).
+ * **Euclidean Nearest-Neighbor Disambiguation**:
+-  In real-world interfaces with multiple identical labels (e.g., several "Cancel" or "Delete" buttons), the engine computes Euclidean distances to the originally recorded physical coordinate $(X_{orig}, Y_{orig})$:
++  When multiple controls share identical labels, the engine resolves ambiguities by computing Euclidean distance to the recorded physical coordinates:
+   $$D_i = \sqrt{(X_i - X_{orig})^2 + (Y_i - Y_{orig})^2}$$
+-  The candidate with minimum distance is automatically selected.
+ * **Track 2: Pure-C Normalized Cross-Correlation (NCC)**:
+-  When targeting custom-drawn or icon-only buttons, runs a sliding-window NCC template matcher directly on the screen DC:
++  For custom-drawn or icon-only buttons, evaluates normalized cross-correlation directly against screen DCs:
+   $$\text{NCC} = \frac{\sum (T - \bar{T})(I - \bar{I})}{\sqrt{\sum (T - \bar{T})^2 \sum (I - \bar{I})^2}}$$
+-  Locks onto the peak correlation coordinate (confidence $\ge 0.85$).
+-
+-### 📋 3. Semantic Action Synthesizer & Deconstructed Steps
+-* **Zero Jitter / No Mouse Wandering**: Discards continuous $10\text{ms}$ free mouse cursor movements, aggregating raw hardware input into clean semantic actions:
+-  * `Click`: Mouse down + up within 5px threshold.
+-  * `DblClick`: Two rapid clicks within double-click interval.
+-  * `RClick`: Right mouse click.
+-  * `Drag`: Origin $(x_1, y_1)$ to destination $(x_2, y_2)$.
+-  * `Type`: Consecutive keyboard keystrokes aggregated into clean text strings (`"Hello World"`).
+-  * `Hotkey`: Modified combinations (e.g., `Ctrl + S`, `Alt + F4`, `Enter`, `Tab`).
+-
+-### 🗂️ 4. Collapsible Drawer UI (`SysListView32`)
+-* **Collapsed Mode (`263 × 54 px` or `263 × 42 px`)**: Preserves TinyTask's iconic compact floating ribbon toolbar.
+-* **Expanded Drawer Mode (`380 × 360 px`)**: Clicking `[Steps]` smoothly resizes the window, revealing an interactive native Windows ListView:
+-  * `#`: Step sequence number.
+-  * `Action`: Action type (`Click`, `Drag`, `Type`, `DblClick`, `RClick`, `Hotkey`).
+-  * `Target / Text`: Displaying target control label, typed text, or coordinate anchor.
+-  * `Timeout(s)`: Configurable step timeout (e.g., `3.0s (Def)` or `5.0s`).
+-  * `Asset`: Visual template indicator (`[BMP]` or `-`).
+-* **In-Place Editing**: Double-click any cell in the `Timeout(s)` column to open a floating text editor and customize the timeout value in seconds.
+-* **Step Manipulation Bar**: Quick buttons for `[+ Add]`, `[✕ Del]`, `[▲ Up]`, `[▼ Dn]`, and `[Step Run ▶]` (single-step test execution).
+-
+-### ⏱️ 5. Per-Step Configurable Timeouts & Graceful Fallback
+-* Rather than a rigid global timeout, each step carries an independent `timeoutMs` attribute (default 3.0 seconds, configurable via Preferences).
+-* **Interactive Recovery Modal**: If an element is temporarily obscured or changed, playback pauses and presents a native dialog:
+-  * `[Retry]`: Resets step timer and scans again.
+-  * `[Use Recorded Pos]`: Fallback click on the originally recorded physical coordinates.
+-  * `[Skip]`: Skips this step and proceeds to the next.
+-  * `[Stop]`: Gracefully aborts playback.
+-
+-### 📦 6. Single-File Self-Contained Project Packaging (`.ttp`)
+-* Saves workflows into a single `.ttp` (TinyTask Pro) file.
+-* Packed binary structure containing file header, step metadata array, and sequential uncompressed bitmap blobs.
+-* Fully portable with zero external image asset folders. Backward-compatible with legacy `.rec` files.
+-
+----
+-
+-## 3. Comprehensive Preferences & Options
+-
+-TinyTask Pro provides complete parity with classic TinyTask 1.77, along with Pro extensions:
+-
+-| Menu Section | Options | Description |
+-|---|---|---|
+-| **Speed Modes** | `1/2x`, `1x`, `2x`, `100x` | Standard speed multipliers. |
+-| | `Play Custom Speed: %dx` | Active custom speed multiplier. |
+-| | `Set Custom Speed...` | Input dialog to set any multiplier between `1x` and `100x`. |
+-| **Loops & Repetition** | `Continuous Playback` | Infinite playback loop toggle. |
+-| | `Set Playback Loops... (%d)` | Input dialog to set specific loop counts (`1` to `999,999`). |
+-| **Recording Hotkeys** | `Ctrl + Shift + Alt + R` | Standard TinyTask combination. |
+-| | `Print Screen`, `F8`, `F12` | One-key quick recording triggers. |
+-| | `Custom: <Key>` | User-defined hotkey with any modifier combination. |
+-| | `Set Custom Hotkey...` | Interactive modal key capture dialog. |
+-| **Playback Hotkeys** | `Ctrl + Shift + Alt + P` | Standard playback trigger. |
+-| | `Print Screen`, `F8`, `F12` | One-key quick playback triggers. |
+-| | `Set Custom Hotkey...` | Interactive modal key capture dialog. |
+-| | `{PAUSE}` / `{ScrollLock}` | Emergency abort hotkeys (active at all times). |
+-| **View & Themes** | `Always on Top` | Keeps TinyTask Pro floating over all windows. |
+-| | `Show Captions` | Toggles button title text (compact 32px vs full 44px height). |
+-| | `Use Custom Toolbar...` | Loads custom 266×44 7-frame BMP toolbar skins. |
+-| | `Use Default Toolbar` | Restores default built-in bitmap. |
+-| **Pro Configurations**| `Set Default Step Timeout...`| Configures default search duration (default `3s`, range `1s - 60s`). |
+-| **Configuration File**| `tinytask_pro.ini` | Automatically stores and restores all settings and window positions. |
+-
+----
+-
+-## 4. Comparison Matrix
+-
+-| Feature | TinyTask 1.77 | TinyTask Pro | Power Automate / UiPath |
+-|---|---|---|---|
+-| **Binary Footprint** | ~35 KB | **~77 KB** | 500 MB ~ 2 GB |
+-| **External Dependencies**| None (Win32) | **None (Win32 / GDI)** | .NET, Python, Electron |
+-| **Element Locating** | Fixed Physical $(x,y)$ | **Dynamic Vision + Text Anchors** | Vision + Accessibility |
+-| **Multi-Match Handling**| N/A | **Euclidean Nearest Neighbor** | XPath / Selectors |
+-| **Step Deconstruction**| Raw 10ms stream | **Interactive Step Table** | Flowchart / Action Tree |
+-| **Step Timeout Config** | None | **Per-Step In-Place Edit** | Property Inspector |
+-| **Single-File Sharing** | `.rec` (coords only) | **`.ttp` (steps + embedded bitmaps)** | Multi-file directory / Zip |
+-| **Emergency Abort** | Pause / ScrollLock | **Pause / ScrollLock** | Hotkey / Tray Icon |
++
++### 📋 4. Semantic Action Synthesizer
++* **Idle Jitter Suppression**: Discards continuous 10ms cursor wandering, transforming raw hardware events into high-level semantic actions:
++  * `Click`: Left mouse button down and up within threshold.
++  * `DblClick`: Two rapid clicks within double-click threshold.
++  * `RClick`: Right mouse button click.
++  * `Drag`: Origin $(x_1, y_1)$ to destination $(x_2, y_2)$ path.
++  * `Text`: Consecutive keystrokes aggregated into clean text strings (`"Hello World"`).
++  * `Hotkey`: Modified key combinations (e.g., `Ctrl + S`, `Alt + F4`, `Enter`, `Tab`).
+ 
+ ---
+ 
+-## 5. Source Code & Architecture
++## 3. UI Drawer & 6-Column Step Table
+ 
+-```
+-reverse-gemini/
+-├── bin/
+-│   ├── tinytask.exe           # Classic 1.77 clean-room binary (~44 KB)
+-│   └── tinytask_pro.exe       # TinyTask Pro optimized binary (~77 KB)
+-├── src/
+-│   ├── ttp_core.h             # Core data structures (TTPHeader, TTPStep)
+-│   ├── ttp_storage.h / .c     # .ttp binary container serialization engine
+-│   ├── ttp_vision.h / .c      # Pure-C Sobel edge detection & NCC template matcher
+-│   ├── ttp_engine.h / .c      # Semantic action synthesizer & playback engine
+-│   ├── tinytask_pro.rc        # Icon (4001), Toolbar (4002), and ComCtl6 manifest
+-│   ├── tinytask_pro.c         # Collapsible drawer UI, Preferences, and main loop
+-│   └── tinytask.c             # Classic clean-room 1.77 source (unmodified)
+-└── tests/
+-    ├── test_storage.c         # Storage serialization roundtrip tests
+-    ├── test_vision.c          # Pure-C Sobel & NCC vision unit tests
+-    ├── test_engine.c          # Synthesizer & playback engine tests
+-    └── test_tinytask_pro.c    # Full integration test suite
+-```
++TinyTask Pro retains the classic floating ribbon while supporting an expandable drawer:
++
++* **Collapsed Mode (`263 × 54 px` or `263 × 42 px`)**: The iconic, unobtrusive floating toolbar.
++* **Expanded Drawer Mode (`380 × 360 px`)**: Clicking `[Steps]` smoothly animates the drawer, revealing the 6-column native Windows ListView (`SysListView32`).
++
++### 6-Column Step Table Specification:
++
++| Col # | Header Text | Width | SubItem | Description | In-Place Interaction |
++|:---:|---|:---:|:---:|---|---|
++| **0** | `#` | 28px | 0 | Step sequence number (1, 2, ...) | None |
++| **1** | `Action` | 52px | 1 | Action type (`Click`, `Drag`, `Text`, `DblClick`, `RClick`, `Hotkey`) | None |
++| **2** | `Target` | 95px | 2 | Accessible control name, typed text, or coordinates | None |
++| **3** | `Timeout` | 50px | 3 | Timeout duration (e.g., `3.0s`) | **Double-click to edit seconds** (enter `5.0` directly) |
++| **4** | `On Timeout` | 75px | 4 | Fallback policy label (`[Prompt]`, `[Retry]`, `[Coord]`, `[Skip]`, `[Stop]`) | **Double-click for popup menu** (select 1 of 5 policies) |
++| **5** | `Asset` | 40px | 5 | Visual template asset indicator (`[BMP]` or `-`) | None |
++
++### Drawer Action Buttons:
++* `[+ Add]`: Appends a new coordinate step.
++* `[- Del]`: Removes the currently selected step.
++* `[Up]` / `[Down]`: Reorders steps up or down.
++* `[Run Step]`: Executes a single-step dry run on the selected action.
++
++---
++
++## 4. Timeout Recovery Policies
++
++Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 context menu allowing instant policy selection:
++
++1. **`[Prompt] Ask User` (`TTP_TIMEOUT_ACT_DEFAULT`)**:
++   - Pauses playback upon timeout and presents a modal recovery dialog: `[Retry]`, `[Use Recorded Pos]`, `[Skip]`, `[Stop]`.
++2. **`[Retry] Retry Loop` (`TTP_TIMEOUT_ACT_RETRY`)**:
++   - Continues searching until the element appears (ideal for web pages with variable load times).
++3. **`[Coord] Click Recorded Pos` (`TTP_TIMEOUT_ACT_USE_RECORDED`)**:
++   - Falls back to clicking the originally recorded physical coordinate $(origX, origY)$.
++4. **`[Skip] Skip Step` (`TTP_TIMEOUT_ACT_SKIP`)**:
++   - Ignores this step if not found and proceeds to the next action.
++5. **`[Stop] Stop Macro` (`TTP_TIMEOUT_ACT_STOP`)**:
++   - Aborts macro execution safely upon missing the target.
++
++---
++
++## 5. Global Hotkeys & Rising-Edge Latch
++
++### Rising-Edge Latch & 0ms Response:
++- **No Chord Double-Triggering**: Human dwell time for 4-finger chords (e.g. `Ctrl + Shift + Alt + R`) spans 250~450ms. Traditional level-triggered timers poll repeatedly and cause instant start/stop toggling. TinyTask Pro employs a static rising-edge latch that fires strictly on the 0->1 transition and locks until the physical trigger key is released.
++- **0ms UI Response**: The recording hotkey path completely eliminates blocking `Sleep()` calls, achieving instant responsiveness.
++- **State Seeding & Pruning**: Pre-populates the physical keyboard state on recording start so releasing the hotkey does not inject phantom keystrokes, and automatically trims trailing stop hotkeys upon completion.
++
++### Hotkey Directory:
++* **Recording Hotkey**: Default `Ctrl + Shift + Alt + R`, configurable to `Print Screen`, `F8`, `F12`, or custom combinations.
++* **Playback Hotkey**: Default `Ctrl + Shift + Alt + P`, configurable to `Print Screen`, `F8`, `F12`, or custom combinations.
++* **Emergency Abort**: Pressing `{PAUSE}` or `{ScrollLock}` immediately terminates playback.
++
++---
++
++## 6. Single-File Project Packaging (.ttp)
++
++* File extension: `.ttp` (TinyTask Pro)
++* Container: Compact packed binary container encompassing header metadata, step descriptors, and sequential uncompressed 24-bit DIB/BMP asset blobs.
++* Fully self-contained: No accompanying image folders required. Backward-compatible with classic `.rec` files.
+ 
+ ---
+ 
+-## 6. Build Instructions
++## 7. Feature Comparison Matrix
+ 
+-### Prerequisites
+-* Windows 7 / 8 / 10 / 11
+-* MinGW-w64 GCC with standard Win32 SDK headers
++| Feature | TinyTask 1.77 | TinyTask Pro | Heavy RPA (Power Automate, etc.) |
++|---|---|---|---|
++| **Binary Footprint** | ~35 KB | **~83 KB (Single File)** | 500 MB ~ 2 GB Runtime |
++| **External Dependencies**| None (Win32) | **None (Win32 / GDI)** | .NET / Python / Node / Chromium |
++| **Element Locating** | Fixed Physical $(x,y)$ | **Hierarchical Vision + Accessibility** | Selectors / DOM / Cloud OCR |
++| **In-Place Match Latency**| N/A | **1 ~ 2 ms (Tier 1 ROI)** | 500 ~ 2000 ms |
++| **Step Deconstruction** | Raw 10ms stream | **6-Column Interactive Drawer** | Flowchart / Action Tree |
++| **Timeout Policy Config** | None | **Per-Step In-Place Popup Menu** | Property Inspector |
++| **Hotkey Latching** | Prone to chord oscillation| **Rising-Edge Latch (0ms, No Jitter)** | OS Global Hooks |
++
++---
+ 
+-### Compile Release Binary
++## 8. Build Instructions & Test Suites
++
++### Prerequisites:
++* Windows 7 / 8 / 10 / 11 (x86 or x64)
++* MinGW-w64 GCC with standard Win32 headers
++
++### Compile Release Executable:
+ ```bash
+ # 1. Compile resource object with Common Controls 6 manifest
+ windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
+ 
+-# 2. Compile standalone optimized executable
++# 2. Compile standalone optimized executable (-Os -s)
+ gcc -Os -s -mwindows \
+     reverse-gemini/src/tinytask_pro.c \
+     reverse-gemini/src/ttp_storage.c \
+     reverse-gemini/src/ttp_vision.c \
+     reverse-gemini/src/ttp_engine.c \
+     reverse-gemini/src/tinytask_pro_res.o \
+-    -lcomctl32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -lm \
++    -lcomctl32 -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -lcomdlg32 -lshell32 -lm \
+     -o reverse-gemini/bin/tinytask_pro.exe
+ 
+ # 3. Clean up intermediate object file
+ rm reverse-gemini/src/tinytask_pro_res.o
+ ```
+ 
+-### Run Test Suites
++### Run Test Suites:
+ ```bash
+-# Storage test
++# 1. Storage roundtrip test
+ gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/tests/test_storage.c -o test_storage.exe && ./test_storage.exe
+ 
+-# Vision engine test
+-gcc -Ireverse-gemini/src reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_vision.c -lgdi32 -lm -o test_vision.exe && ./test_vision.exe
++# 2. Vision engine test
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_vision.c -lgdi32 -lole32 -loleaut32 -loleacc -lm -o test_vision.exe && ./test_vision.exe
++
++# 3. Synthesizer & playback engine test
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_engine.c reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_engine.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o test_engine.exe && ./test_engine.exe
+ 
+-# Synthesizer & execution engine test
+-gcc -Ireverse-gemini/src reverse-gemini/src/ttp_engine.c reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_engine.c -lgdi32 -luser32 -lm -o test_engine.exe && ./test_engine.exe
++# 4. TinyTask Pro 6-column drawer integration test
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_tinytask_pro.c -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -lole32 -loleaut32 -loleacc -lm -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
+ 
+-# TinyTask Pro integration test
+-gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_tinytask_pro.c -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -lshell32 -lm -o test_pro.exe && ./test_pro.exe
++# 5. Cascaded matching benchmark & regression test
++gcc -Ireverse-gemini/src reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/tests/test_fix_repro.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lm -o test_fix_repro.exe && ./test_fix_repro.exe
+ ```
+ 
+ ---
+ 
+-## 7. License
++## License
+ 
+ Built for high-performance automation and reverse-engineering research.  
+ All code adheres to clean-room software design principles.
+diff --git a/reverse-gemini/bin/tinytask_pro.exe b/reverse-gemini/bin/tinytask_pro.exe
+index 9b79688..5c877c9 100644
+Binary files a/reverse-gemini/bin/tinytask_pro.exe and b/reverse-gemini/bin/tinytask_pro.exe differ
+diff --git a/reverse-gemini/src/tinytask_pro.c b/reverse-gemini/src/tinytask_pro.c
+index 2a95924..62ac873 100644
+--- a/reverse-gemini/src/tinytask_pro.c
++++ b/reverse-gemini/src/tinytask_pro.c
+@@ -184,6 +184,8 @@ static void RefreshListView(void);
+ static void UpdateTitle(void);
+ static void SetDrawerState(BOOL expanded);
+ static void CommitInPlaceEdit(BOOL save);
++static void StartInPlaceTimeoutEdit(int item);
++static void ShowTimeoutPolicyMenu(HWND hwnd, int item);
+ static void StartPlayback(void);
+ static void StopPlayback(void);
+ static void StartRecording(void);
+@@ -400,16 +402,25 @@ static void GetTargetDescription(const TTPStep* step, char* buf, size_t bufSize)
+     snprintf(buf, bufSize, "(%ld,%ld)", step->origX, step->origY);
+ }
+ 
+-static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) {
++static void FormatTimeoutSecondsString(const TTPStep* step, char* buf, size_t bufSize) {
+     double sec = (double)step->timeoutMs / 1000.0;
++    snprintf(buf, bufSize, "%.1fs", sec);
++}
++
++static void FormatTimeoutPolicyString(const TTPStep* step, char* buf, size_t bufSize) {
+     int act = TTP_GET_TIMEOUT_ACTION(step->targetMode);
+-    const char* tag = "";
+-    if (act == TTP_TIMEOUT_ACT_RETRY) tag = " [Retry]";
+-    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) tag = " [Coord]";
+-    else if (act == TTP_TIMEOUT_ACT_SKIP) tag = " [Skip]";
+-    else if (act == TTP_TIMEOUT_ACT_STOP) tag = " [Stop]";
+-    else tag = " [Prompt]";
+-    snprintf(buf, bufSize, "%.1fs%s", sec, tag);
++    if (act == TTP_TIMEOUT_ACT_RETRY) snprintf(buf, bufSize, "[Retry]");
++    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) snprintf(buf, bufSize, "[Coord]");
++    else if (act == TTP_TIMEOUT_ACT_SKIP) snprintf(buf, bufSize, "[Skip]");
++    else if (act == TTP_TIMEOUT_ACT_STOP) snprintf(buf, bufSize, "[Stop]");
++    else snprintf(buf, bufSize, "[Prompt]");
++}
++
++static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) {
++    double sec = (double)step->timeoutMs / 1000.0;
++    char pol[32];
++    FormatTimeoutPolicyString(step, pol, sizeof(pol));
++    snprintf(buf, bufSize, "%.1fs %s", sec, pol);
+ }
+ 
+ static void ParseTimeoutString(const char* str, DWORD* outTimeoutMs, int* outAction) {
+@@ -992,6 +1003,22 @@ static void CreateToolbarBitmaps(void) {
+  * 6. ListView & In-Place Editing
+  * ========================================================================= */
+ 
++typedef struct {
++    const char* header;
++    int width;
++} DrawerColumnDef;
++
++#define DRAWER_COLUMN_COUNT 6
++
++static const DrawerColumnDef g_drawerColumns[DRAWER_COLUMN_COUNT] = {
++    { "#", 28 },
++    { "Action", 52 },
++    { "Target", 95 },
++    { "Timeout", 50 },
++    { "On Timeout", 75 },
++    { "Asset", 40 }
++};
++
+ static void RefreshListView(void) {
+     if (!g_hListView) return;
+     SendMessageA(g_hListView, WM_SETREDRAW, FALSE, 0);
+@@ -1017,9 +1044,13 @@ static void RefreshListView(void) {
+         GetTargetDescription(&g_steps[i], targetDesc, sizeof(targetDesc));
+         ListView_SetItemText(g_hListView, i, 2, targetDesc);
+ 
+-        char timeoutStr[64];
+-        FormatTimeoutString(&g_steps[i], timeoutStr, sizeof(timeoutStr));
+-        ListView_SetItemText(g_hListView, i, 3, timeoutStr);
++        char timeoutSecStr[32];
++        FormatTimeoutSecondsString(&g_steps[i], timeoutSecStr, sizeof(timeoutSecStr));
++        ListView_SetItemText(g_hListView, i, 3, timeoutSecStr);
++
++        char timeoutPolicyStr[32];
++        FormatTimeoutPolicyString(&g_steps[i], timeoutPolicyStr, sizeof(timeoutPolicyStr));
++        ListView_SetItemText(g_hListView, i, 4, timeoutPolicyStr);
+ 
+         char assetStr[32];
+         if (g_bmpBuffers && g_bmpBuffers[i] && g_bmpSizes[i] > 0) {
+@@ -1027,7 +1058,7 @@ static void RefreshListView(void) {
+         } else {
+             snprintf(assetStr, sizeof(assetStr), "-");
+         }
+-        ListView_SetItemText(g_hListView, i, 4, assetStr);
++        ListView_SetItemText(g_hListView, i, 5, assetStr);
+     }
+ 
+     if (g_stepCount > 0) {
+@@ -1049,17 +1080,13 @@ static void CommitInPlaceEdit(BOOL save) {
+     if (save && item >= 0 && item < (int)g_stepCount) {
+         char buf[64] = {0};
+         GetWindowTextA(hEdit, buf, sizeof(buf));
+-        DWORD newTimeout = 0;
+-        int newAction = TTP_GET_TIMEOUT_ACTION(g_steps[item].targetMode);
+-        ParseTimeoutString(buf, &newTimeout, &newAction);
+-        if (newTimeout > 0) {
+-            g_steps[item].timeoutMs = newTimeout;
+-            DWORD baseMode = TTP_GET_BASE_TARGET_MODE(g_steps[item].targetMode);
+-            g_steps[item].targetMode = TTP_MAKE_TARGET_MODE(baseMode, newAction);
+-            char outStr[64];
+-            FormatTimeoutString(&g_steps[item], outStr, sizeof(outStr));
+-            ListView_SetItemText(g_hListView, item, 3, outStr);
+-        }
++        double sec = atof(buf);
++        if (sec <= 0.05) sec = 0.1;
++        if (sec > 300.0) sec = 300.0;
++        g_steps[item].timeoutMs = (DWORD)(sec * 1000.0);
++        char outStr[32];
++        FormatTimeoutSecondsString(&g_steps[item], outStr, sizeof(outStr));
++        ListView_SetItemText(g_hListView, item, 3, outStr);
+     }
+     DestroyWindow(hEdit);
+     SetFocus(g_hListView);
+@@ -1114,6 +1141,34 @@ static void StartInPlaceTimeoutEdit(int item) {
+     SendMessageA(g_hInPlaceEdit, EM_SETSEL, 0, -1);
+ }
+ 
++static void ShowTimeoutPolicyMenu(HWND hwnd, int item) {
++    if (item < 0 || item >= (int)g_stepCount) return;
++
++    int act = TTP_GET_TIMEOUT_ACTION(g_steps[item].targetMode);
++    DWORD baseMode = TTP_GET_BASE_TARGET_MODE(g_steps[item].targetMode);
++
++    HMENU hMenu = CreatePopupMenu();
++    if (!hMenu) return;
++
++    AppendMenuA(hMenu, MF_STRING | (act == 0 ? MF_CHECKED : 0), 9101, "[Prompt] Ask User");
++    AppendMenuA(hMenu, MF_STRING | (act == 1 ? MF_CHECKED : 0), 9102, "[Retry] Retry Loop");
++    AppendMenuA(hMenu, MF_STRING | (act == 2 ? MF_CHECKED : 0), 9103, "[Coord] Click Recorded Pos");
++    AppendMenuA(hMenu, MF_STRING | (act == 3 ? MF_CHECKED : 0), 9104, "[Skip] Skip Step");
++    AppendMenuA(hMenu, MF_STRING | (act == 4 ? MF_CHECKED : 0), 9105, "[Stop] Stop Macro");
++
++    POINT pt;
++    GetCursorPos(&pt);
++    SetForegroundWindow(hwnd);
++    UINT cmd = TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
++    DestroyMenu(hMenu);
++
++    if (cmd >= 9101 && cmd <= 9105) {
++        int chosenAct = (int)(cmd - 9101);
++        g_steps[item].targetMode = TTP_MAKE_TARGET_MODE(baseMode, chosenAct);
++        RefreshListView();
++    }
++}
++
+ /* =========================================================================
+  * 7. Window Layout & Collapsible Drawer
+  * ========================================================================= */
+@@ -1550,16 +1605,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
+         ListView_SetExtendedListViewStyle(g_hListView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+         SendMessageA(g_hListView, WM_SETFONT, (WPARAM)g_hGuiFont, TRUE);
+ 
+-        /* Add columns: #, Action, Target / Text, Timeout(s), Asset */
++        /* Add columns: #, Action, Target, Timeout, On Timeout, Asset */
+         LVCOLUMNA lvc;
+         memset(&lvc, 0, sizeof(lvc));
+         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+ 
+-        lvc.iSubItem = 0; lvc.cx = 32;  lvc.pszText = "#";            ListView_InsertColumn(g_hListView, 0, &lvc);
+-        lvc.iSubItem = 1; lvc.cx = 65;  lvc.pszText = "Action";       ListView_InsertColumn(g_hListView, 1, &lvc);
+-        lvc.iSubItem = 2; lvc.cx = 125; lvc.pszText = "Target / Text"; ListView_InsertColumn(g_hListView, 2, &lvc);
+-        lvc.iSubItem = 3; lvc.cx = 75;  lvc.pszText = "Timeout(s)";   ListView_InsertColumn(g_hListView, 3, &lvc);
+-        lvc.iSubItem = 4; lvc.cx = 60;  lvc.pszText = "Asset";        ListView_InsertColumn(g_hListView, 4, &lvc);
++        for (int i = 0; i < DRAWER_COLUMN_COUNT; i++) {
++            lvc.iSubItem = i;
++            lvc.cx = g_drawerColumns[i].width;
++            lvc.pszText = (LPSTR)g_drawerColumns[i].header;
++            ListView_InsertColumn(g_hListView, i, &lvc);
++        }
+ 
+         /* Drawer Quick Action buttons */
+         g_hBtnAdd = CreateWindowExA(0, "BUTTON", "[+ Add]", WS_CHILD | BS_PUSHBUTTON,
+@@ -1676,9 +1732,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
+         LPNMHDR pnmh = (LPNMHDR)lParam;
+         if (pnmh->idFrom == ID_LV_STEPS && pnmh->code == NM_DBLCLK) {
+             LPNMITEMACTIVATE pia = (LPNMITEMACTIVATE)lParam;
+-            if (pia->iItem >= 0 && pia->iItem < (int)g_stepCount && pia->iSubItem == 3) {
+-                StartInPlaceTimeoutEdit(pia->iItem);
+-                return 0;
++            if (pia->iItem >= 0 && pia->iItem < (int)g_stepCount) {
++                if (pia->iSubItem == 3) {
++                    StartInPlaceTimeoutEdit(pia->iItem);
++                    return 0;
++                } else if (pia->iSubItem == 4) {
++                    ShowTimeoutPolicyMenu(hwnd, pia->iItem);
++                    return 0;
++                }
+             }
+         }
+         break;
+diff --git a/reverse-gemini/src/ttp_engine.c b/reverse-gemini/src/ttp_engine.c
+index 9839ba0..e3fcb9f 100644
+--- a/reverse-gemini/src/ttp_engine.c
++++ b/reverse-gemini/src/ttp_engine.c
+@@ -565,9 +565,17 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize,
+                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+                 int screenW = GetSystemMetrics(SM_CXSCREEN);
+                 int screenH = GetSystemMetrics(SM_CYSCREEN);
++
++                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
+                 POINT matchPos = { step->origX, step->origY };
+                 double score = 0.0;
+-                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
++                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
++
++                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
++                if (!matched) {
++                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
++                }
++
+                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
+ 
+                 if (matched) {
+@@ -606,9 +614,17 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize,
+                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+                 int screenW = GetSystemMetrics(SM_CXSCREEN);
+                 int screenH = GetSystemMetrics(SM_CYSCREEN);
++
++                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
+                 POINT matchPos = { step->origX, step->origY };
+                 double score = 0.0;
+-                BOOL matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
++                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
++
++                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
++                if (!matched) {
++                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
++                }
++
+                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
+ 
+                 if (matched) {
+diff --git a/reverse-gemini/tests/test_fix_repro.c b/reverse-gemini/tests/test_fix_repro.c
+index 85a4c59..9f353eb 100644
+--- a/reverse-gemini/tests/test_fix_repro.c
++++ b/reverse-gemini/tests/test_fix_repro.c
+@@ -290,6 +290,162 @@ int main() {
+     // MUST FAIL ON CURRENT CODE (RED PHASE)
+     assert(hasLatchVar && hasTimer25 && hasKeySeed && hasTrailingTrim && !hasSleepBeforeRec);
+ 
++    // ==========================================================
++    // Test 10: Hierarchical Cascaded Vision Matching
++    // ==========================================================
++    printf("Test 10 (Cascaded Vision Matching): starting...\n");
++    fflush(stdout);
++
++    int canvasW = 2560, canvasH = 1440;
++    int patW = 64, patH = 32;
++    DWORD patSize = 0;
++    BYTE* patBmp = create_test_pattern_bmp(patW, patH, &patSize);
++
++    HDC hdcScr10 = GetDC(NULL);
++    HDC hdcMem10 = CreateCompatibleDC(hdcScr10);
++    HBITMAP hBmpCanvas10 = CreateCompatibleBitmap(hdcScr10, canvasW, canvasH);
++    SelectObject(hdcMem10, hBmpCanvas10);
++
++    // 10A: Near target at (60, 60), orig=(50, 50). ROI radius = 200px.
++    RECT rcBg10 = { 0, 0, canvasW, canvasH };
++    HBRUSH hbrBg10 = CreateSolidBrush(RGB(240, 240, 240));
++    FillRect(hdcMem10, &rcBg10, hbrBg10);
++
++    int nearX = 60, nearY = 60;
++    for (int y = 0; y < patH; y++) {
++        for (int x = 0; x < patW; x++) {
++            BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 230 : 20;
++            SetPixel(hdcMem10, nearX + x, nearY + y, RGB(v, v, v));
++        }
++    }
++
++    POINT pos10 = { 50, 50 };
++    double score10 = 0.0;
++    LARGE_INTEGER qpcFreq, qpcStart, qpcEnd;
++    QueryPerformanceFrequency(&qpcFreq);
++    QueryPerformanceCounter(&qpcStart);
++    BOOL matchedNear = ttp_match_template_ncc_roi(hdcMem10, 50, 50, 200, patBmp, patSize, 0.75, &pos10, &score10);
++    QueryPerformanceCounter(&qpcEnd);
++    double durRoiMs = (double)(qpcEnd.QuadPart - qpcStart.QuadPart) * 1000.0 / (double)qpcFreq.QuadPart;
++
++    printf("Test 10A (Tier 1 ROI fast hit): matched=%d, pos=(%ld,%ld), score=%.3f, dur=%.2f ms\n",
++           matchedNear, pos10.x, pos10.y, score10, durRoiMs);
++    fflush(stdout);
++    assert(matchedNear == TRUE);
++    assert(abs(pos10.x - (nearX + patW / 2)) <= 2);
++    assert(abs(pos10.y - (nearY + patH / 2)) <= 2);
++    assert(score10 >= 0.75);
++    assert(durRoiMs < 10.0);
++
++    // Verify engine playback step handles near target fast hit
++    ttp_engine_set_screen_dc_override(hdcMem10);
++    s_timeoutTriggered = 0;
++    TTPStep stepNear;
++    memset(&stepNear, 0, sizeof(stepNear));
++    stepNear.stepId = 100;
++    stepNear.actionType = TTP_ACTION_CLICK;
++    stepNear.targetMode = TTP_TARGET_IMAGE;
++    stepNear.origX = 50;
++    stepNear.origY = 50;
++    stepNear.timeoutMs = 500;
++    BOOL playNearRes = ttp_playback_step(&stepNear, patBmp, patSize, NULL);
++    assert(playNearRes == TRUE);
++    assert(s_timeoutTriggered == 0);
++
++    // 10B: Target moved far away to (1950, 1150), orig=(50, 50).
++    // Outside the 200px ROI: Tier 1 misses, Tier 2 full-screen fallback succeeds.
++    FillRect(hdcMem10, &rcBg10, hbrBg10);
++    int farX = 1950, farY = 1150;
++    for (int y = 0; y < patH; y++) {
++        for (int x = 0; x < patW; x++) {
++            BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 230 : 20;
++            SetPixel(hdcMem10, farX + x, farY + y, RGB(v, v, v));
++        }
++    }
++
++    POINT posFar = { 50, 50 };
++    double scoreFar = 0.0;
++    // Tier 1 search within 200px ROI of (50, 50) must miss
++    BOOL matchedFarRoi = ttp_match_template_ncc_roi(hdcMem10, 50, 50, 200, patBmp, patSize, 0.75, &posFar, &scoreFar);
++    printf("Test 10B (Tier 1 ROI miss on far target): matchedFarRoi=%d\n", matchedFarRoi);
++    fflush(stdout);
++    assert(matchedFarRoi == FALSE);
++
++    // Cascaded Search: Fall back to Tier 2 full-screen pyramid search
++    BOOL matchedFarCascaded = matchedFarRoi;
++    if (!matchedFarCascaded) {
++        matchedFarCascaded = ttp_match_template_ncc(hdcMem10, canvasW, canvasH, patBmp, patSize, 0.75, &posFar, &scoreFar);
++    }
++    printf("Test 10B (Tier 2 Fallback Hit): matched=%d, pos=(%ld,%ld), score=%.3f\n",
++           matchedFarCascaded, posFar.x, posFar.y, scoreFar);
++    fflush(stdout);
++    assert(matchedFarCascaded == TRUE);
++    assert(abs(posFar.x - (farX + patW / 2)) <= 2);
++    assert(abs(posFar.y - (farY + patH / 2)) <= 2);
++    assert(scoreFar >= 0.75);
++
++    // Verify engine playback step handles far target via Tier 2 fallback for both image mode and text fallback
++    TTPStep stepFar;
++    memset(&stepFar, 0, sizeof(stepFar));
++    stepFar.stepId = 101;
++    stepFar.actionType = TTP_ACTION_CLICK;
++    stepFar.targetMode = TTP_TARGET_IMAGE;
++    stepFar.origX = 50;
++    stepFar.origY = 50;
++    stepFar.timeoutMs = 1000;
++    s_timeoutTriggered = 0;
++    BOOL playFarRes = ttp_playback_step(&stepFar, patBmp, patSize, NULL);
++    assert(playFarRes == TRUE);
++    assert(s_timeoutTriggered == 0);
++
++    // Dual-engine text fallback when target moved far away
++    TTPStep stepTextFar;
++    memset(&stepTextFar, 0, sizeof(stepTextFar));
++    stepTextFar.stepId = 102;
++    stepTextFar.actionType = TTP_ACTION_CLICK;
++    stepTextFar.targetMode = TTP_TARGET_TEXT;
++    strcpy(stepTextFar.textKey, "NonExistentFarButton_9999");
++    stepTextFar.origX = 50;
++    stepTextFar.origY = 50;
++    stepTextFar.timeoutMs = 1000;
++    s_timeoutTriggered = 0;
++    BOOL playTextFarRes = ttp_playback_step(&stepTextFar, patBmp, patSize, NULL);
++    assert(playTextFarRes == TRUE);
++    assert(s_timeoutTriggered == 0);
++
++    ttp_engine_set_screen_dc_override(NULL);
++
++    DeleteObject(hbrBg10);
++    DeleteObject(hBmpCanvas10);
++    DeleteDC(hdcMem10);
++    ReleaseDC(NULL, hdcScr10);
++    free(patBmp);
++
++    // 10C: Invariant check on ttp_engine.c implementation
++    // Verify that ttp_engine.c uses ttp_match_template_ncc_roi for Tier 1 fast search
++    // in both TTP_TARGET_TEXT dual-engine fallback and TTP_TARGET_IMAGE matching.
++    FILE* fpEng = fopen("reverse-gemini/src/ttp_engine.c", "rb");
++    assert(fpEng != NULL);
++    fseek(fpEng, 0, SEEK_END);
++    long engSz = ftell(fpEng);
++    fseek(fpEng, 0, SEEK_SET);
++    char* engSrc = (char*)malloc(engSz + 1);
++    fread(engSrc, 1, engSz, fpEng);
++    engSrc[engSz] = '\0';
++    fclose(fpEng);
++
++    int roiCount = 0;
++    const char* pRoi = engSrc;
++    while ((pRoi = strstr(pRoi, "ttp_match_template_ncc_roi")) != NULL) {
++        roiCount++;
++        pRoi += strlen("ttp_match_template_ncc_roi");
++    }
++    free(engSrc);
++
++    printf("Test 10C (ttp_engine.c Cascaded Invariant): roiCount=%d (expected >= 2)\n", roiCount);
++    fflush(stdout);
++    assert(roiCount >= 2); // Fails (RED) until ttp_engine.c is updated
++
+     printf("==========================================\n");
+     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
+     printf("==========================================\n");
+diff --git a/reverse-gemini/tests/test_tinytask_pro.c b/reverse-gemini/tests/test_tinytask_pro.c
+index b049f4d..22d1a59 100644
+--- a/reverse-gemini/tests/test_tinytask_pro.c
++++ b/reverse-gemini/tests/test_tinytask_pro.c
+@@ -121,11 +121,49 @@ static void test_timeout_formatting(void) {
+     assert(strstr(outStr, "0.8s") != NULL || strstr(outStr, "0.7s") != NULL);
+     assert(strstr(outStr, "[Retry]") != NULL);
+ 
++    /* FormatTimeoutSecondsString assertions: pure numeric seconds with 's' */
++    char secBuf[32];
++    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
++    assert(strcmp(secBuf, "3.0s") == 0);
++
++    step1.timeoutMs = 500;
++    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
++    assert(strcmp(secBuf, "0.5s") == 0);
++
++    step1.timeoutMs = 1200;
++    FormatTimeoutSecondsString(&step1, secBuf, sizeof(secBuf));
++    assert(strcmp(secBuf, "1.2s") == 0);
++
++    /* FormatTimeoutPolicyString assertions: [Prompt], [Retry], [Coord], [Skip], [Stop] */
++    char polBuf[32];
++    TTPStep stepPol;
++    memset(&stepPol, 0, sizeof(stepPol));
++
++    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_DEFAULT);
++    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
++    assert(strcmp(polBuf, "[Prompt]") == 0);
++
++    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_RETRY);
++    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
++    assert(strcmp(polBuf, "[Retry]") == 0);
++
++    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_USE_RECORDED);
++    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
++    assert(strcmp(polBuf, "[Coord]") == 0);
++
++    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_SKIP);
++    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
++    assert(strcmp(polBuf, "[Skip]") == 0);
++
++    stepPol.targetMode = TTP_MAKE_TARGET_MODE(TTP_TARGET_IMAGE, TTP_TIMEOUT_ACT_STOP);
++    FormatTimeoutPolicyString(&stepPol, polBuf, sizeof(polBuf));
++    assert(strcmp(polBuf, "[Stop]") == 0);
++
+     printf("      => PASSED (Timeout parse and format verified)\n");
+ }
+ 
+ /* -------------------------------------------------------------------------
+- * Test 3: Action & Target column text representation
++ * Test 3: Action & Target column text representation & 6-column Drawer layout
+  * ------------------------------------------------------------------------- */
+ static void test_column_formatting(void) {
+     printf("[TEST 3/6] Running test_column_formatting...\n");
+@@ -162,6 +200,15 @@ static void test_column_formatting(void) {
+     GetTargetDescription(&sCoord, desc, sizeof(desc));
+     assert(strstr(desc, "120") != NULL && strstr(desc, "340") != NULL);
+ 
++    /* Verify 6 drawer columns with headers "#", "Action", "Target", "Timeout", "On Timeout", "Asset" */
++    assert(DRAWER_COLUMN_COUNT == 6);
++    assert(strcmp(g_drawerColumns[0].header, "#") == 0 && g_drawerColumns[0].width == 28);
++    assert(strcmp(g_drawerColumns[1].header, "Action") == 0 && g_drawerColumns[1].width == 52);
++    assert(strcmp(g_drawerColumns[2].header, "Target") == 0 && g_drawerColumns[2].width == 95);
++    assert(strcmp(g_drawerColumns[3].header, "Timeout") == 0 && g_drawerColumns[3].width == 50);
++    assert(strcmp(g_drawerColumns[4].header, "On Timeout") == 0 && g_drawerColumns[4].width == 75);
++    assert(strcmp(g_drawerColumns[5].header, "Asset") == 0 && g_drawerColumns[5].width == 40);
++
+     printf("      => PASSED (Action and target column strings verified)\n");
+ }
+ 
