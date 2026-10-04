@@ -764,18 +764,189 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
 }
 
 /* =========================================================================
- * 3. Normalized Cross-Correlation (NCC) Template Matcher
+ * 3. Masked Cascaded NCC Template Matcher (Zero-Heap BSS & Probe SAD)
  * ========================================================================= */
 
-BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
-    if (!bmpPattern || bmpSize < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
-        if (outScore) *outScore = 0.0;
+#define TTP_SCREEN_GRAY_MAX (3840 * 2160)
+static BYTE s_screenGray[TTP_SCREEN_GRAY_MAX];
+
+#define TTP_TEMPLATE_PIXELS_MAX (512 * 512)
+static BYTE s_templateGray[TTP_TEMPLATE_PIXELS_MAX];
+static BYTE s_templateMask[TTP_TEMPLATE_PIXELS_MAX];
+
+typedef struct {
+    int dx;
+    int dy;
+    double t_norm; /* T_i - mu_T */
+} TTPMaskedPixel;
+
+static TTPMaskedPixel s_maskedPixels[TTP_TEMPLATE_PIXELS_MAX];
+
+typedef struct {
+    int dx;
+    int dy;
+    BYTE val;
+} TTPProbePoint;
+
+/* Helper: Capture a rectangular HDC region directly into 8bpp grayscale buffer without heap allocation */
+static BOOL capture_hdc_to_gray(HDC hdcSrc, int srcX, int srcY, int w, int h, BYTE* outGray) {
+    if (!hdcSrc || !outGray || w <= 0 || h <= 0) return FALSE;
+
+    HDC hdcMem = CreateCompatibleDC(hdcSrc);
+    if (!hdcMem) return FALSE;
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = NULL;
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hBmp || !pBits) {
+        DeleteDC(hdcMem);
+        return FALSE;
+    }
+
+    HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
+    if (!BitBlt(hdcMem, 0, 0, w, h, hdcSrc, srcX, srcY, SRCCOPY)) {
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        return FALSE;
+    }
+    GdiFlush();
+
+    const BYTE* srcPx = (const BYTE*)pBits;
+    int total = w * h;
+    for (int i = 0; i < total; i++) {
+        const BYTE* px = srcPx + i * 4;
+        outGray[i] = (BYTE)((px[2] * 77 + px[1] * 150 + px[0] * 29 + 128) >> 8);
+    }
+
+    SelectObject(hdcMem, hOld);
+    DeleteObject(hBmp);
+    DeleteDC(hdcMem);
+    return TRUE;
+}
+
+/* Precompute up to 16 feature probe points (dx_k, dy_k) where mask is 1 and contrast/gradient is high */
+static int select_probe_points(const BYTE* tGray, const BYTE* tMask, int tw, int th, double muT, TTPProbePoint* outProbes, int maxProbes) {
+    if (!tGray || !tMask || !outProbes || maxProbes <= 0 || tw <= 0 || th <= 0) return 0;
+
+    int probeCount = 0;
+
+    /* Pass 1: 4x4 spatial grid partition across template to ensure wide dispersion */
+    int gridX = (tw >= 4) ? 4 : tw;
+    int gridY = (th >= 4) ? 4 : th;
+
+    for (int gy = 0; gy < gridY && probeCount < maxProbes; gy++) {
+        int y0 = gy * th / gridY;
+        int y1 = (gy + 1) * th / gridY;
+        for (int gx = 0; gx < gridX && probeCount < maxProbes; gx++) {
+            int x0 = gx * tw / gridX;
+            int x1 = (gx + 1) * tw / gridX;
+
+            int bestX = -1, bestY = -1;
+            int bestScore = -1;
+
+            for (int y = y0; y < y1; y++) {
+                for (int x = x0; x < x1; x++) {
+                    int idx = y * tw + x;
+                    if (!tMask[idx]) continue;
+
+                    int grad = 0;
+                    if (x > 0 && tMask[idx - 1]) grad += abs((int)tGray[idx] - (int)tGray[idx - 1]);
+                    if (x < tw - 1 && tMask[idx + 1]) grad += abs((int)tGray[idx] - (int)tGray[idx + 1]);
+                    if (y > 0 && tMask[idx - tw]) grad += abs((int)tGray[idx] - (int)tGray[idx - tw]);
+                    if (y < th - 1 && tMask[idx + tw]) grad += abs((int)tGray[idx] - (int)tGray[idx + tw]);
+
+                    int contrast = abs((int)tGray[idx] - (int)(muT + 0.5));
+                    int score = grad * 2 + contrast;
+
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestX = x;
+                        bestY = y;
+                    }
+                }
+            }
+
+            if (bestX >= 0) {
+                outProbes[probeCount].dx = bestX;
+                outProbes[probeCount].dy = bestY;
+                outProbes[probeCount].val = tGray[bestY * tw + bestX];
+                probeCount++;
+            }
+        }
+    }
+
+    /* Pass 2: Fill remaining slots up to maxProbes from other high-contrast masked pixels */
+    if (probeCount < maxProbes) {
+        while (probeCount < maxProbes) {
+            int highestScore = -1;
+            int bestX = -1, bestY = -1;
+
+            for (int y = 0; y < th; y++) {
+                for (int x = 0; x < tw; x++) {
+                    int idx = y * tw + x;
+                    if (!tMask[idx]) continue;
+
+                    BOOL tooClose = FALSE;
+                    for (int p = 0; p < probeCount; p++) {
+                        if (abs(outProbes[p].dx - x) <= 1 && abs(outProbes[p].dy - y) <= 1) {
+                            tooClose = TRUE;
+                            break;
+                        }
+                    }
+                    if (tooClose) continue;
+
+                    int grad = 0;
+                    if (x > 0 && tMask[idx - 1]) grad += abs((int)tGray[idx] - (int)tGray[idx - 1]);
+                    if (x < tw - 1 && tMask[idx + 1]) grad += abs((int)tGray[idx] - (int)tGray[idx + 1]);
+                    if (y > 0 && tMask[idx - tw]) grad += abs((int)tGray[idx] - (int)tGray[idx - tw]);
+                    if (y < th - 1 && tMask[idx + tw]) grad += abs((int)tGray[idx] - (int)tGray[idx + tw]);
+                    int contrast = abs((int)tGray[idx] - (int)(muT + 0.5));
+                    int score = grad * 2 + contrast;
+
+                    if (score > highestScore) {
+                        highestScore = score;
+                        bestX = x;
+                        bestY = y;
+                    }
+                }
+            }
+
+            if (bestX < 0) break;
+
+            outProbes[probeCount].dx = bestX;
+            outProbes[probeCount].dy = bestY;
+            outProbes[probeCount].val = tGray[bestY * tw + bestX];
+            probeCount++;
+        }
+    }
+
+    return probeCount;
+}
+
+/* Core matcher operating directly on an 8bpp grayscale buffer */
+static BOOL match_gray_buffer_masked_ncc(
+    const BYTE* grayBuf, int imgW, int imgH,
+    const BYTE* bmpPattern, DWORD bmpSize,
+    double minScore,
+    int* outBestX, int* outBestY, double* outBestScore)
+{
+    if (!grayBuf || !bmpPattern || bmpSize < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
+        if (outBestScore) *outBestScore = 0.0;
         return FALSE;
     }
 
     const BITMAPFILEHEADER* bmfh = (const BITMAPFILEHEADER*)bmpPattern;
     if (bmfh->bfType != 0x4D42) {
-        if (outScore) *outScore = 0.0;
+        if (outBestScore) *outBestScore = 0.0;
         return FALSE;
     }
 
@@ -783,8 +954,295 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
     int tw = bmih->biWidth;
     int th = abs(bmih->biHeight);
     BOOL isBottomUp = (bmih->biHeight > 0);
+    int bpp = bmih->biBitCount;
 
-    if (tw <= 0 || th <= 0 || bmih->biBitCount != 24) {
+    if (tw <= 0 || th <= 0 || (bpp != 24 && bpp != 32)) {
+        if (outBestScore) *outBestScore = 0.0;
+        return FALSE;
+    }
+
+    if (imgW < tw || imgH < th) {
+        if (outBestScore) *outBestScore = 0.0;
+        return FALSE;
+    }
+
+    int N = tw * th;
+    BYTE* tGray = s_templateGray;
+    BYTE* tMask = s_templateMask;
+    TTPMaskedPixel* mPixels = s_maskedPixels;
+    BOOL dynTemplate = FALSE;
+
+    if (N > TTP_TEMPLATE_PIXELS_MAX) {
+        tGray = (BYTE*)malloc(N);
+        tMask = (BYTE*)malloc(N);
+        mPixels = (TTPMaskedPixel*)malloc(N * sizeof(TTPMaskedPixel));
+        dynTemplate = TRUE;
+        if (!tGray || !tMask || !mPixels) {
+            if (tGray) free(tGray);
+            if (tMask) free(tMask);
+            if (mPixels) free(mPixels);
+            if (outBestScore) *outBestScore = 0.0;
+            return FALSE;
+        }
+    }
+
+    int tStride = (bpp == 32) ? (tw * 4) : (((tw * 3 + 3) / 4) * 4);
+    const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
+    if (bmfh->bfOffBits >= bmpSize) {
+        if (dynTemplate) { free(tGray); free(tMask); free(mPixels); }
+        if (outBestScore) *outBestScore = 0.0;
+        return FALSE;
+    }
+
+    int Nm = 0;
+    double sumT = 0.0;
+
+    for (int y = 0; y < th; y++) {
+        int bmpRow = isBottomUp ? (th - 1 - y) : y;
+        const BYTE* row = tPixels + bmpRow * tStride;
+        for (int x = 0; x < tw; x++) {
+            int idx = y * tw + x;
+            BYTE gray;
+            BYTE m = 1;
+            if (bpp == 32) {
+                BYTE b = row[x * 4 + 0];
+                BYTE g = row[x * 4 + 1];
+                BYTE r = row[x * 4 + 2];
+                BYTE a = row[x * 4 + 3];
+                gray = (BYTE)((r * 77 + g * 150 + b * 29 + 128) >> 8);
+                m = (a > 128) ? 1 : 0;
+            } else {
+                BYTE b = row[x * 3 + 0];
+                BYTE g = row[x * 3 + 1];
+                BYTE r = row[x * 3 + 2];
+                gray = (BYTE)((r * 77 + g * 150 + b * 29 + 128) >> 8);
+                m = 1;
+            }
+            tGray[idx] = gray;
+            tMask[idx] = m;
+            if (m) {
+                Nm++;
+                sumT += gray;
+            }
+        }
+    }
+
+    /* Fall back to standard unmasked template if foreground is too small or covers whole pattern */
+    if (Nm < 16 || Nm == N) {
+        memset(tMask, 1, N);
+        Nm = N;
+        sumT = 0.0;
+        for (int i = 0; i < N; i++) {
+            sumT += tGray[i];
+        }
+    }
+
+    double muT = sumT / (double)Nm;
+    double sigmaT2 = 0.0;
+    int mCount = 0;
+
+    for (int y = 0; y < th; y++) {
+        for (int x = 0; x < tw; x++) {
+            int idx = y * tw + x;
+            if (tMask[idx]) {
+                double d = (double)tGray[idx] - muT;
+                sigmaT2 += d * d;
+                mPixels[mCount].dx = x;
+                mPixels[mCount].dy = y;
+                mPixels[mCount].t_norm = d;
+                mCount++;
+            }
+        }
+    }
+
+    if (sigmaT2 < 1e-6) {
+        if (dynTemplate) { free(tGray); free(tMask); free(mPixels); }
+        if (outBestScore) *outBestScore = 0.0;
+        return FALSE;
+    }
+
+    TTPProbePoint probes[16];
+    int numProbes = select_probe_points(tGray, tMask, tw, th, muT, probes, 16);
+    if (numProbes == 0) {
+        probes[0].dx = mPixels[0].dx;
+        probes[0].dy = mPixels[0].dy;
+        probes[0].val = tGray[mPixels[0].dy * tw + mPixels[0].dx];
+        numProbes = 1;
+    }
+
+    int maxX = imgW - tw;
+    int maxY = imgH - th;
+    int bestX = 0;
+    int bestY = 0;
+    double bestScore = -2.0;
+
+    int step = 1;
+    if ((long long)maxX * (long long)maxY > 500000LL) {
+        step = 2;
+    }
+
+    int maxAllowedSad = numProbes * 60;
+
+    typedef struct {
+        int x;
+        int y;
+        double score;
+    } CoarseCand;
+    CoarseCand topCands[8];
+    int topCandCount = 0;
+
+    for (int y = 0; y <= maxY; y += step) {
+        for (int x = 0; x <= maxX; x += step) {
+            /* Tier 1: Probe SAD coarse filtering */
+            int sadSum = 0;
+            BOOL passedProbe = TRUE;
+            for (int k = 0; k < numProbes; k++) {
+                int scrVal = grayBuf[(y + probes[k].dy) * imgW + (x + probes[k].dx)];
+                sadSum += abs(scrVal - (int)probes[k].val);
+                if (sadSum > maxAllowedSad) {
+                    passedProbe = FALSE;
+                    break;
+                }
+            }
+            if (!passedProbe) continue;
+
+            /* Tier 2: Masked NCC */
+            double sumI = 0.0;
+            double sumI2 = 0.0;
+            double cov = 0.0;
+            for (int k = 0; k < Nm; k++) {
+                int pxX = x + mPixels[k].dx;
+                int pxY = y + mPixels[k].dy;
+                double val = (double)grayBuf[pxY * imgW + pxX];
+                sumI += val;
+                sumI2 += val * val;
+                cov += mPixels[k].t_norm * val;
+            }
+
+            double varI = sumI2 - (sumI * sumI) / (double)Nm;
+            if (varI <= 25.0) continue;
+
+            double denom = ttp_sqrt(sigmaT2 * varI);
+            if (denom < 1e-9) continue;
+
+            double score = cov / denom;
+            if (score > 1.0) score = 1.0;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestX = x;
+                bestY = y;
+            }
+
+            if (step > 1 && score >= 0.35) {
+                int existing = -1;
+                int distThresh = (tw > th) ? (th / 2) : (tw / 2);
+                if (distThresh < 4) distThresh = 4;
+                for (int c = 0; c < topCandCount; c++) {
+                    if (abs(topCands[c].x - x) <= distThresh && abs(topCands[c].y - y) <= distThresh) {
+                        existing = c;
+                        break;
+                    }
+                }
+                if (existing >= 0) {
+                    if (score > topCands[existing].score) {
+                        topCands[existing].x = x;
+                        topCands[existing].y = y;
+                        topCands[existing].score = score;
+                    }
+                } else if (topCandCount < 8) {
+                    topCands[topCandCount].x = x;
+                    topCands[topCandCount].y = y;
+                    topCands[topCandCount].score = score;
+                    topCandCount++;
+                } else {
+                    int minIdx = 0;
+                    for (int c = 1; c < topCandCount; c++) {
+                        if (topCands[c].score < topCands[minIdx].score) minIdx = c;
+                    }
+                    if (score > topCands[minIdx].score) {
+                        topCands[minIdx].x = x;
+                        topCands[minIdx].y = y;
+                        topCands[minIdx].score = score;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Fine refinement pass if coarse step > 1 */
+    if (step > 1 && bestScore > 0.20) {
+        if (topCandCount == 0) {
+            topCands[0].x = bestX;
+            topCands[0].y = bestY;
+            topCands[0].score = bestScore;
+            topCandCount = 1;
+        }
+
+        for (int c = 0; c < topCandCount; c++) {
+            int cx = topCands[c].x;
+            int cy = topCands[c].y;
+            int fx0 = (cx - 4 < 0) ? 0 : cx - 4;
+            int fx1 = (cx + 4 > maxX) ? maxX : cx + 4;
+            int fy0 = (cy - 4 < 0) ? 0 : cy - 4;
+            int fy1 = (cy + 4 > maxY) ? maxY : cy + 4;
+
+            for (int y = fy0; y <= fy1; y++) {
+                for (int x = fx0; x <= fx1; x++) {
+                    double sumI = 0.0;
+                    double sumI2 = 0.0;
+                    double cov = 0.0;
+                    for (int k = 0; k < Nm; k++) {
+                        int pxX = x + mPixels[k].dx;
+                        int pxY = y + mPixels[k].dy;
+                        double val = (double)grayBuf[pxY * imgW + pxX];
+                        sumI += val;
+                        sumI2 += val * val;
+                        cov += mPixels[k].t_norm * val;
+                    }
+
+                    double varI = sumI2 - (sumI * sumI) / (double)Nm;
+                    if (varI <= 25.0) continue;
+
+                    double denom = ttp_sqrt(sigmaT2 * varI);
+                    if (denom < 1e-9) continue;
+
+                    double score = cov / denom;
+                    if (score > 1.0) score = 1.0;
+
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestX = x;
+                        bestY = y;
+                    }
+                }
+            }
+        }
+    }
+
+    if (dynTemplate) {
+        free(tGray);
+        free(tMask);
+        free(mPixels);
+    }
+
+    if (outBestX) *outBestX = bestX;
+    if (outBestY) *outBestY = bestY;
+    if (outBestScore) *outBestScore = (bestScore < -1.0) ? 0.0 : bestScore;
+
+    return (bestScore >= minScore);
+}
+
+BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
+    if (!bmpPattern || bmpSize < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
+        if (outScore) *outScore = 0.0;
+        return FALSE;
+    }
+
+    const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
+    int tw = bmih->biWidth;
+    int th = abs(bmih->biHeight);
+    if (tw <= 0 || th <= 0) {
         if (outScore) *outScore = 0.0;
         return FALSE;
     }
@@ -800,8 +1258,16 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         }
     }
 
-    if (screenW <= 0) screenW = GetSystemMetrics(SM_CXSCREEN);
-    if (screenH <= 0) screenH = GetSystemMetrics(SM_CYSCREEN);
+    if (screenW <= 0 || screenH <= 0) {
+        HGDIOBJ hCurBmp = GetCurrentObject(hdc, OBJ_BITMAP);
+        BITMAP bm;
+        if (hCurBmp && GetObject(hCurBmp, sizeof(BITMAP), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            screenW = bm.bmWidth;
+            screenH = bm.bmHeight;
+        }
+        if (screenW <= 0) screenW = GetSystemMetrics(SM_CXSCREEN);
+        if (screenH <= 0) screenH = GetSystemMetrics(SM_CYSCREEN);
+    }
 
     if (screenW < tw || screenH < th) {
         if (releaseDC) ReleaseDC(NULL, hdc);
@@ -809,11 +1275,11 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         return FALSE;
     }
 
-    /* Tier-1: Localized ROI match around initial coordinate hint (<5ms) */
+    /* Fast ROI match if coordinate hint provided (<5ms) */
     if (outMatchPos && (outMatchPos->x > 0 || outMatchPos->y > 0)) {
         POINT roiPt = *outMatchPos;
         double roiScore = 0.0;
-        if (ttp_match_template_ncc_roi(hdc, roiPt.x, roiPt.y, 250, bmpPattern, bmpSize, minScore, &roiPt, &roiScore)) {
+        if (ttp_match_template_masked_ncc_roi(hdc, roiPt.x, roiPt.y, 250, bmpPattern, bmpSize, minScore, &roiPt, &roiScore)) {
             *outMatchPos = roiPt;
             if (outScore) *outScore = roiScore;
             if (releaseDC) ReleaseDC(NULL, hdc);
@@ -821,367 +1287,79 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         }
     }
 
-    int tStride = ((tw * 3 + 3) / 4) * 4;
-    const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
-    int N = tw * th;
-
-    double* T = (double*)malloc(N * sizeof(double));
-    if (!T) {
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-
-    double sumT = 0.0;
-    for (int y = 0; y < th; y++) {
-        int bmpRow = isBottomUp ? (th - 1 - y) : y;
-        const BYTE* row = tPixels + bmpRow * tStride;
-        for (int x = 0; x < tw; x++) {
-            BYTE b = row[x * 3 + 0];
-            BYTE g = row[x * 3 + 1];
-            BYTE r = row[x * 3 + 2];
-            double lum = 0.299 * r + 0.587 * g + 0.114 * b;
-            T[y * tw + x] = lum;
-            sumT += lum;
+    BYTE* scrGray = s_screenGray;
+    BOOL dynScreen = FALSE;
+    if ((size_t)screenW * (size_t)screenH > TTP_SCREEN_GRAY_MAX) {
+        scrGray = (BYTE*)malloc((size_t)screenW * (size_t)screenH);
+        dynScreen = TRUE;
+        if (!scrGray) {
+            if (releaseDC) ReleaseDC(NULL, hdc);
+            if (outScore) *outScore = 0.0;
+            return FALSE;
         }
     }
 
-    double meanT = sumT / N;
-    double sumSqDiffT = 0.0;
-    for (int i = 0; i < N; i++) {
-        double d = T[i] - meanT;
-        sumSqDiffT += d * d;
-    }
-    double denomT = ttp_sqrt(sumSqDiffT);
-
-    if (denomT < 1e-6) {
-        free(T);
+    if (!capture_hdc_to_gray(hdc, 0, 0, screenW, screenH, scrGray)) {
+        if (dynScreen) free(scrGray);
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
         return FALSE;
     }
-
-    double* nT = (double*)malloc(N * sizeof(double));
-    if (!nT) {
-        free(T);
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-    for (int i = 0; i < N; i++) {
-        nT[i] = (T[i] - meanT) / denomT;
+    if (releaseDC) {
+        ReleaseDC(NULL, hdc);
+        releaseDC = FALSE;
     }
 
-    /* Compute 2x box-filtered template T2 for coarse search pyramid */
-    int TW2 = tw / 2;
-    int TH2 = th / 2;
-    int N2 = TW2 * TH2;
-    double* nT2 = NULL;
-    if (TW2 >= 4 && TH2 >= 4) {
-        double* T2 = (double*)malloc(N2 * sizeof(double));
-        if (T2) {
-            double sumT2 = 0.0;
-            for (int y2 = 0; y2 < TH2; y2++) {
-                for (int x2 = 0; x2 < TW2; x2++) {
-                    double v = 0.25 * (
-                        T[(2 * y2) * tw + (2 * x2)] +
-                        T[(2 * y2) * tw + (2 * x2 + 1)] +
-                        T[(2 * y2 + 1) * tw + (2 * x2)] +
-                        T[(2 * y2 + 1) * tw + (2 * x2 + 1)]
-                    );
-                    T2[y2 * TW2 + x2] = v;
-                    sumT2 += v;
-                }
-            }
-            double meanT2 = sumT2 / N2;
-            double sumSqDiffT2 = 0.0;
-            for (int i = 0; i < N2; i++) {
-                double d = T2[i] - meanT2;
-                sumSqDiffT2 += d * d;
-            }
-            double denomT2 = ttp_sqrt(sumSqDiffT2);
-            nT2 = (double*)malloc(N2 * sizeof(double));
-            if (nT2) {
-                if (denomT2 > 1e-6) {
-                    for (int i = 0; i < N2; i++) {
-                        nT2[i] = (T2[i] - meanT2) / denomT2;
-                    }
-                } else {
-                    memset(nT2, 0, N2 * sizeof(double));
-                }
-            }
-            free(T2);
-        }
-    }
-    free(T);
+    int bestX = 0, bestY = 0;
+    double bestScore = 0.0;
+    BOOL matched = match_gray_buffer_masked_ncc(scrGray, screenW, screenH, bmpPattern, bmpSize, minScore, &bestX, &bestY, &bestScore);
 
-    /* Capture screen DC into 32bpp top-down DIB */
-    HDC hdcMem = CreateCompatibleDC(hdc);
-    if (!hdcMem) {
-        if (nT2) free(nT2);
-        free(nT);
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
+    if (dynScreen) free(scrGray);
 
-    BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = screenW;
-    bi.bmiHeader.biHeight = -screenH; /* top-down */
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    void* pScreenBits = NULL;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pScreenBits, NULL, 0);
-    if (!hBmp || !pScreenBits) {
-        DeleteDC(hdcMem);
-        if (nT2) free(nT2);
-        free(nT);
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-
-    HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
-    if (!BitBlt(hdcMem, 0, 0, screenW, screenH, hdc, 0, 0, SRCCOPY)) {
-        SelectObject(hdcMem, hOld);
-        DeleteObject(hBmp);
-        DeleteDC(hdcMem);
-        if (nT2) free(nT2);
-        free(nT);
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-    GdiFlush();
-
-    int screenPixels = screenW * screenH;
-    double* S = (double*)malloc(screenPixels * sizeof(double));
-    if (!S) {
-        SelectObject(hdcMem, hOld);
-        DeleteObject(hBmp);
-        DeleteDC(hdcMem);
-        if (nT2) free(nT2);
-        free(nT);
-        if (releaseDC) ReleaseDC(NULL, hdc);
-        if (outScore) *outScore = 0.0;
-        return FALSE;
-    }
-
-    const BYTE* srcPx = (const BYTE*)pScreenBits;
-    for (int y = 0; y < screenH; y++) {
-        for (int x = 0; x < screenW; x++) {
-            const BYTE* px = srcPx + (y * screenW + x) * 4;
-            S[y * screenW + x] = 0.299 * px[2] + 0.587 * px[1] + 0.114 * px[0];
-        }
-    }
-
-    SelectObject(hdcMem, hOld);
-    DeleteObject(hBmp);
-    DeleteDC(hdcMem);
-    if (releaseDC) ReleaseDC(NULL, hdc);
-
-    int bestX = 0;
-    int bestY = 0;
-    double bestScore = -1.0;
-
-    if (nT2 && screenW >= 16 && screenH >= 16) {
-        /* Pass 1: Coarse search on 2x box-filtered pyramid layer */
-        int W2 = screenW / 2;
-        int H2 = screenH / 2;
-        int N_S2 = W2 * H2;
-        double* S2 = (double*)malloc(N_S2 * sizeof(double));
-        if (S2) {
-            for (int y2 = 0; y2 < H2; y2++) {
-                const double* r0 = &S[(2 * y2) * screenW];
-                const double* r1 = &S[(2 * y2 + 1) * screenW];
-                double* dst = &S2[y2 * W2];
-                for (int x2 = 0; x2 < W2; x2++) {
-                    dst[x2] = 0.25 * (r0[2 * x2] + r0[2 * x2 + 1] + r1[2 * x2] + r1[2 * x2 + 1]);
-                }
-            }
-
-            int satStride2 = W2 + 1;
-            int satSize2 = satStride2 * (H2 + 1);
-            double* sat1_2 = (double*)calloc(satSize2, sizeof(double));
-            double* sat2_2 = (double*)calloc(satSize2, sizeof(double));
-            if (sat1_2 && sat2_2) {
-                for (int y = 0; y < H2; y++) {
-                    double rowSum1 = 0.0, rowSum2 = 0.0;
-                    const double* row = &S2[y * W2];
-                    for (int x = 0; x < W2; x++) {
-                        double v = row[x];
-                        rowSum1 += v;
-                        rowSum2 += v * v;
-                        sat1_2[(y + 1) * satStride2 + (x + 1)] = sat1_2[y * satStride2 + (x + 1)] + rowSum1;
-                        sat2_2[(y + 1) * satStride2 + (x + 1)] = sat2_2[y * satStride2 + (x + 1)] + rowSum2;
-                    }
-                }
-
-                int maxX2 = W2 - TW2;
-                int maxY2 = H2 - TH2;
-                typedef struct { int x; int y; double score; } CoarseCand;
-                CoarseCand cands[8];
-                int candCount = 0;
-
-                for (int y2 = 0; y2 <= maxY2; y2++) {
-                    int y1_idx = y2 * satStride2;
-                    int y2_idx = (y2 + TH2) * satStride2;
-                    for (int x2 = 0; x2 <= maxX2; x2++) {
-                        double sumI = sat1_2[y2_idx + (x2 + TW2)] - sat1_2[y1_idx + (x2 + TW2)]
-                                    - sat1_2[y2_idx + x2] + sat1_2[y1_idx + x2];
-                        double sumI2 = sat2_2[y2_idx + (x2 + TW2)] - sat2_2[y1_idx + (x2 + TW2)]
-                                     - sat2_2[y2_idx + x2] + sat2_2[y1_idx + x2];
-
-                        double varI = sumI2 - (sumI * sumI) / N2;
-                        if (varI <= 25.0) continue;
-
-                        double denomI = ttp_sqrt(varI);
-                        double num = 0.0;
-                        for (int v = 0; v < TH2; v++) {
-                            const double* pS2 = &S2[(y2 + v) * W2 + x2];
-                            const double* pnT2 = &nT2[v * TW2];
-                            for (int u = 0; u < TW2; u++) {
-                                num += pnT2[u] * pS2[u];
-                            }
-                        }
-                        double score = num / denomI;
-                        if (score >= 0.35) {
-                            int foundIdx = -1;
-                            int minDist = (TW2 > TH2) ? (TH2 / 2) : (TW2 / 2);
-                            if (minDist < 4) minDist = 4;
-                            for (int k = 0; k < candCount; k++) {
-                                if (abs(cands[k].x - x2) <= minDist && abs(cands[k].y - y2) <= minDist) {
-                                    foundIdx = k;
-                                    break;
-                                }
-                            }
-                            if (foundIdx >= 0) {
-                                if (score > cands[foundIdx].score) {
-                                    cands[foundIdx].x = x2;
-                                    cands[foundIdx].y = y2;
-                                    cands[foundIdx].score = score;
-                                }
-                            } else if (candCount < 8) {
-                                cands[candCount].x = x2;
-                                cands[candCount].y = y2;
-                                cands[candCount].score = score;
-                                candCount++;
-                            } else {
-                                int minIdx = 0;
-                                for (int k = 1; k < candCount; k++) {
-                                    if (cands[k].score < cands[minIdx].score) minIdx = k;
-                                }
-                                if (score > cands[minIdx].score) {
-                                    cands[minIdx].x = x2;
-                                    cands[minIdx].y = y2;
-                                    cands[minIdx].score = score;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                /* Pass 2: Fine polish on top coarse candidates */
-                for (int k = 0; k < candCount; k++) {
-                    int cX = cands[k].x * 2;
-                    int cY = cands[k].y * 2;
-                    int fineX0 = max(0, cX - 8);
-                    int fineX1 = min(screenW - tw, cX + 8);
-                    int fineY0 = max(0, cY - 8);
-                    int fineY1 = min(screenH - th, cY + 8);
-
-                    for (int y = fineY0; y <= fineY1; y++) {
-                        for (int x = fineX0; x <= fineX1; x++) {
-                            double sumI = 0.0, sumI2 = 0.0, num = 0.0;
-                            for (int v = 0; v < th; v++) {
-                                const double* pS = &S[(y + v) * screenW + x];
-                                const double* pnT = &nT[v * tw];
-                                for (int u = 0; u < tw; u++) {
-                                    double val = pS[u];
-                                    sumI += val;
-                                    sumI2 += val * val;
-                                    num += pnT[u] * val;
-                                }
-                            }
-                            double varI = sumI2 - (sumI * sumI) / N;
-                            if (varI <= 25.0) continue;
-                            double score = num / ttp_sqrt(varI);
-                            if (score > bestScore) {
-                                bestScore = score;
-                                bestX = x;
-                                bestY = y;
-                            }
-                        }
-                    }
-                }
-
-                free(sat1_2);
-                free(sat2_2);
-            }
-            free(S2);
-        }
-        free(nT2);
-    } else {
-        /* Fallback for very small templates (<8x8) */
-        int maxX = screenW - tw;
-        int maxY = screenH - th;
-        for (int y = 0; y <= maxY; y += 2) {
-            for (int x = 0; x <= maxX; x += 2) {
-                double sumI = 0.0, sumI2 = 0.0, num = 0.0;
-                for (int v = 0; v < th; v++) {
-                    const double* pS = &S[(y + v) * screenW + x];
-                    const double* pnT = &nT[v * tw];
-                    for (int u = 0; u < tw; u++) {
-                        double val = pS[u];
-                        sumI += val;
-                        sumI2 += val * val;
-                        num += pnT[u] * val;
-                    }
-                }
-                double varI = sumI2 - (sumI * sumI) / N;
-                if (varI <= 25.0) continue;
-                double score = num / ttp_sqrt(varI);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestX = x;
-                    bestY = y;
-                }
-            }
-        }
-    }
-
-    free(S);
-    free(nT);
-
-    if (outScore) {
-        *outScore = (bestScore < -1.0) ? 0.0 : bestScore;
-    }
-
-    if (outMatchPos && bestScore > -1.0) {
+    if (outScore) *outScore = bestScore;
+    if (outMatchPos && bestScore > 0.0) {
         outMatchPos->x = bestX + tw / 2;
         outMatchPos->y = bestY + th / 2;
     }
 
-    if (bestScore >= minScore) {
-        return TRUE;
-    }
-
-    return FALSE;
+    return matched;
 }
 
-BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
+BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
     if (!bmpPattern || bmpSize < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) {
         if (outScore) *outScore = 0.0;
         return FALSE;
     }
     if (roiRadius <= 0) roiRadius = 200;
 
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
+    int tw = bmih->biWidth;
+    int th = abs(bmih->biHeight);
+    if (tw <= 0 || th <= 0) {
+        if (outScore) *outScore = 0.0;
+        return FALSE;
+    }
+
+    HDC hdc = hdcScreen;
+    BOOL releaseDC = FALSE;
+    if (!hdc) {
+        hdc = GetDC(NULL);
+        releaseDC = TRUE;
+        if (!hdc) {
+            if (outScore) *outScore = 0.0;
+            return FALSE;
+        }
+    }
+
+    int screenW = 0, screenH = 0;
+    HGDIOBJ hCurBmp = GetCurrentObject(hdc, OBJ_BITMAP);
+    BITMAP bm;
+    if (hCurBmp && GetObject(hCurBmp, sizeof(BITMAP), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+        screenW = bm.bmWidth;
+        screenH = bm.bmHeight;
+    }
+    if (screenW <= 0) screenW = GetSystemMetrics(SM_CXSCREEN);
+    if (screenH <= 0) screenH = GetSystemMetrics(SM_CYSCREEN);
 
     int x0 = roiX - roiRadius; if (x0 < 0) x0 = 0;
     int y0 = roiY - roiRadius; if (y0 < 0) y0 = 0;
@@ -1190,165 +1368,53 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
 
     int roiW = x1 - x0;
     int roiH = y1 - y0;
-    if (roiW <= 20 || roiH <= 20) return FALSE;
-
-    const BITMAPFILEHEADER* bmfh = (const BITMAPFILEHEADER*)bmpPattern;
-    const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
-    int tw = bmih->biWidth;
-    int th = abs(bmih->biHeight);
-    BOOL isBottomUp = (bmih->biHeight > 0);
-    if (roiW < tw || roiH < th) return FALSE;
-
-    HDC hdc = hdcScreen ? hdcScreen : GetDC(NULL);
-    HDC hdcMem = CreateCompatibleDC(hdc);
-    if (!hdcMem) return FALSE;
-
-    BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = roiW;
-    bi.bmiHeader.biHeight = -roiH;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    void* pBits = NULL;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
-    if (!hBmp || !pBits) {
-        DeleteDC(hdcMem);
-        if (!hdcScreen) ReleaseDC(NULL, hdc);
+    if (roiW < tw || roiH < th) {
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        if (outScore) *outScore = 0.0;
         return FALSE;
     }
 
-    HGDIOBJ hOld = SelectObject(hdcMem, hBmp);
-    BitBlt(hdcMem, 0, 0, roiW, roiH, hdc, x0, y0, SRCCOPY);
-    GdiFlush();
-
-    int N = tw * th;
-    double* T = (double*)malloc(N * sizeof(double));
-    int tStride = ((tw * 3 + 3) / 4) * 4;
-    const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
-    double sumT = 0.0;
-    for (int y = 0; y < th; y++) {
-        int bmpRow = isBottomUp ? (th - 1 - y) : y;
-        const BYTE* row = tPixels + bmpRow * tStride;
-        for (int x = 0; x < tw; x++) {
-            double lum = 0.299 * row[x * 3 + 2] + 0.587 * row[x * 3 + 1] + 0.114 * row[x * 3 + 0];
-            T[y * tw + x] = lum;
-            sumT += lum;
+    BYTE* scrGray = s_screenGray;
+    BOOL dynScreen = FALSE;
+    if ((size_t)roiW * (size_t)roiH > TTP_SCREEN_GRAY_MAX) {
+        scrGray = (BYTE*)malloc((size_t)roiW * (size_t)roiH);
+        dynScreen = TRUE;
+        if (!scrGray) {
+            if (releaseDC) ReleaseDC(NULL, hdc);
+            if (outScore) *outScore = 0.0;
+            return FALSE;
         }
     }
-    double meanT = sumT / N;
-    double sumSqDiffT = 0.0;
-    for (int i = 0; i < N; i++) {
-        double d = T[i] - meanT;
-        sumSqDiffT += d * d;
-    }
-    double denomT = ttp_sqrt(sumSqDiffT);
-    if (denomT < 1e-6) {
-        free(T);
-        SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem);
-        if (!hdcScreen) ReleaseDC(NULL, hdc);
+
+    if (!capture_hdc_to_gray(hdc, x0, y0, roiW, roiH, scrGray)) {
+        if (dynScreen) free(scrGray);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        if (outScore) *outScore = 0.0;
         return FALSE;
     }
-    double* nT = (double*)malloc(N * sizeof(double));
-    for (int i = 0; i < N; i++) nT[i] = (T[i] - meanT) / denomT;
-    free(T);
+    if (releaseDC) ReleaseDC(NULL, hdc);
 
-    double* S = (double*)malloc(roiW * roiH * sizeof(double));
-    const BYTE* srcPx = (const BYTE*)pBits;
-    for (int y = 0; y < roiH; y++) {
-        for (int x = 0; x < roiW; x++) {
-            const BYTE* px = srcPx + (y * roiW + x) * 4;
-            S[y * roiW + x] = 0.299 * px[2] + 0.587 * px[1] + 0.114 * px[0];
-        }
-    }
-
-    SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem);
-    if (!hdcScreen) ReleaseDC(NULL, hdc);
-
-    int satStride = roiW + 1;
-    double* sat1 = (double*)calloc(satStride * (roiH + 1), sizeof(double));
-    double* sat2 = (double*)calloc(satStride * (roiH + 1), sizeof(double));
-    for (int y = 0; y < roiH; y++) {
-        double r1 = 0.0, r2 = 0.0;
-        for (int x = 0; x < roiW; x++) {
-            double v = S[y * roiW + x];
-            r1 += v; r2 += v * v;
-            sat1[(y + 1) * satStride + (x + 1)] = sat1[y * satStride + (x + 1)] + r1;
-            sat2[(y + 1) * satStride + (x + 1)] = sat2[y * satStride + (x + 1)] + r2;
-        }
-    }
-
-    int maxX = roiW - tw;
-    int maxY = roiH - th;
-    double bestScore = -1.0;
     int bestX = 0, bestY = 0;
+    double bestScore = 0.0;
+    BOOL matched = match_gray_buffer_masked_ncc(scrGray, roiW, roiH, bmpPattern, bmpSize, minScore, &bestX, &bestY, &bestScore);
 
-    for (int y = 0; y <= maxY; y += 2) {
-        int y1 = y; int y2 = y + th;
-        for (int x = 0; x <= maxX; x += 2) {
-            int x1 = x; int x2 = x + tw;
-            double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
-                        - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
-            double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
-                         - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
-            double varI = sumI2 - (sumI * sumI) / N;
-            if (varI <= 25.0) continue;
-            double denomI = ttp_sqrt(varI);
-            double num = 0.0;
-            for (int v = 0; v < th; v++) {
-                const double* pS = &S[(y + v) * roiW + x];
-                const double* pnT = &nT[v * tw];
-                for (int u = 0; u < tw; u++) num += pnT[u] * pS[u];
-            }
-            double score = num / denomI;
-            if (score > bestScore) {
-                bestScore = score;
-                bestX = x; bestY = y;
-            }
-        }
-    }
+    if (dynScreen) free(scrGray);
 
-    if (bestScore > 0.40) {
-        int fx0 = max(0, bestX - 2); int fx1 = min(maxX, bestX + 2);
-        int fy0 = max(0, bestY - 2); int fy1 = min(maxY, bestY + 2);
-        for (int y = fy0; y <= fy1; y++) {
-            int y1 = y; int y2 = y + th;
-            for (int x = fx0; x <= fx1; x++) {
-                int x1 = x; int x2 = x + tw;
-                double sumI = sat1[y2 * satStride + x2] - sat1[y1 * satStride + x2]
-                            - sat1[y2 * satStride + x1] + sat1[y1 * satStride + x1];
-                double sumI2 = sat2[y2 * satStride + x2] - sat2[y1 * satStride + x2]
-                             - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
-                double varI = sumI2 - (sumI * sumI) / N;
-                if (varI <= 25.0) continue;
-                double denomI = ttp_sqrt(varI);
-                double num = 0.0;
-                for (int v = 0; v < th; v++) {
-                    const double* pS = &S[(y + v) * roiW + x];
-                    const double* pnT = &nT[v * tw];
-                    for (int u = 0; u < tw; u++) num += pnT[u] * pS[u];
-                }
-                double score = num / denomI;
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestX = x; bestY = y;
-                }
-            }
-        }
-    }
-
-    free(sat1); free(sat2); free(S); free(nT);
-    if (outScore) *outScore = (bestScore < -1.0) ? 0.0 : bestScore;
-    if (outMatchPos && bestScore > -1.0) {
+    if (outScore) *outScore = bestScore;
+    if (outMatchPos && bestScore > 0.0) {
         outMatchPos->x = x0 + bestX + tw / 2;
         outMatchPos->y = y0 + bestY + th / 2;
     }
-    if (bestScore >= minScore) {
-        return TRUE;
-    }
-    return FALSE;
+
+    return matched;
+}
+
+BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
+    return ttp_match_template_masked_ncc(hdcScreen, screenW, screenH, bmpPattern, bmpSize, minScore, outMatchPos, outScore);
+}
+
+BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore) {
+    return ttp_match_template_masked_ncc_roi(hdcScreen, roiX, roiY, roiRadius, bmpPattern, bmpSize, minScore, outMatchPos, outScore);
 }
 
 BOOL ttp_get_accessible_element_at_point(POINT pt, char* outName, int maxLen, RECT* outRect) {

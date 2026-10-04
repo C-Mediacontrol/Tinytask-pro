@@ -38,6 +38,13 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
  * Returns TRUE on success. */
 BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, BYTE tol, BYTE* outMask);
 
+/* Masked NCC template matcher with Zero-Heap BSS architecture & Probe SAD coarse filtering.
+ * Automatically activates masked matching if bmpPattern is 32bpp BGRA with alpha mask (A == 0 transparent).
+ * If 24bpp or alpha all 255, transparently runs unmasked NCC.
+ */
+BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore);
+BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius, const BYTE* bmpPattern, DWORD bmpSize, double minScore, POINT* outMatchPos, double* outScore);
+
 /* Pure-C Normalized Cross-Correlation (NCC) template matcher:
  * Uses Power Automate hierarchical coarse-to-fine pyramid search (<25ms).
  * If best peak score >= minScore, fills outMatchPos with center (x, y) and returns TRUE.
