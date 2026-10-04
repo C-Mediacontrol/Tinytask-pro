@@ -578,18 +578,49 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                     ttp_diag_log("    candidate[%d] = (%ld, %ld)", k, candidates[k].x, candidates[k].y);
                 }
                 if (count > 0) {
-                    int best = ttp_pick_nearest_candidate(step->origX, step->origY, candidates, count);
-                    if (best >= 0) {
-                        targetX = candidates[best].x;
-                        targetY = candidates[best].y;
-                        targetFound = TRUE;
-                        ttp_diag_log("  [TEXT] Picked candidate %d: target=(%ld, %ld)", best, targetX, targetY);
-                        break;
+                    for (int candTry = 0; candTry < count; candTry++) {
+                        int best = ttp_pick_nearest_candidate(step->origX, step->origY, candidates, count);
+                        if (best < 0) break;
+                        if (candidates[best].x <= -90000) break; // All remaining candidates invalidated
+
+                        POINT candPt = candidates[best];
+                        BOOL verified = TRUE;
+
+                        /* Visual Cross-Validation:
+                         * If visual template bmpData is present, verify that the pattern actually matches near this candidate!
+                         * If candidate is a false positive (e.g. container title, background text),
+                         * reject it and fall back to full-screen visual search! */
+                        if (bmpData && bmpSize > 0) {
+                            HDC hdcScr = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+                            POINT roiPt = candPt;
+                            double roiScore = 0.0;
+                            BOOL roiOk = ttp_match_template_ncc_roi(hdcScr, candPt.x, candPt.y, 80, bmpData, bmpSize, 0.60, &roiPt, &roiScore);
+                            if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScr);
+
+                            ttp_diag_log("  [TEXT_CROSS_VALIDATE] Candidate %d at (%ld, %ld): roiOk=%d, score=%.4f",
+                                best, candPt.x, candPt.y, roiOk, roiScore);
+
+                            if (!roiOk) {
+                                verified = FALSE;
+                                candidates[best].x = -99999;
+                                candidates[best].y = -99999;
+                            } else {
+                                candPt = roiPt; // refine to exact visual button center
+                            }
+                        }
+
+                        if (verified) {
+                            targetX = candPt.x;
+                            targetY = candPt.y;
+                            targetFound = TRUE;
+                            ttp_diag_log("  [TEXT] Picked verified candidate %d: target=(%ld, %ld)", best, targetX, targetY);
+                            break;
+                        }
                     }
                 }
             }
 
-            /* Dual-Engine Fallback: If accessible text was not found, attempt visual NCC match using bmpData */
+            /* Dual-Engine Fallback: If accessible text was not found or failed visual verification, attempt visual NCC match using bmpData */
             if (!targetFound && bmpData && bmpSize > 0) {
                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
                 int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -598,13 +629,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
+                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.70, &matchPos, &score);
                 ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
                     matched, score, matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
-                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
+                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.70, &matchPos, &score);
                     ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
                         matched, score, matchPos.x, matchPos.y);
                 }

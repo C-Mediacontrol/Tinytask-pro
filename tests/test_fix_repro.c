@@ -607,6 +607,83 @@ int main() {
     free(cropBmp);
     ReleaseDC(NULL, hdcScr12);
 
+    // =========================================================================
+    // Test 13: Container Window Rejection & Displaced Button Visual Recovery
+    // =========================================================================
+    printf("\nTest 13: Container Window Rejection & Displaced Button Visual Recovery\n");
+    fflush(stdout);
+
+    // 13A: Top-level container window (e.g. 800x600) must NEVER be treated as a clickable element!
+    WNDCLASSEXA wcTop = {0};
+    wcTop.cbSize = sizeof(wcTop);
+    wcTop.lpfnWndProc = DefWindowProcA;
+    wcTop.hInstance = GetModuleHandleA(NULL);
+    wcTop.lpszClassName = "TTP_TestTopCls";
+    RegisterClassExA(&wcTop);
+
+    HWND hContainer = CreateWindowExA(0, "TTP_TestTopCls", "TestApp_Container_XYZ",
+                                     WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                     900, 350, 800, 600, NULL, NULL, GetModuleHandleA(NULL), NULL);
+    assert(hContainer != NULL);
+    UpdateWindow(hContainer);
+
+    POINT topFoundPts[10];
+    int topFoundCount = ttp_find_elements_by_text("TestApp_Container_XYZ", topFoundPts, 10);
+    printf("Test 13A (Top-level Window Exclusion): topFoundCount=%d (expected 0)\n", topFoundCount);
+    fflush(stdout);
+    assert(topFoundCount == 0); // On buggy code, this returned 1 with window center (1300, 650)!
+
+    // 13B: Displaced Button Recovery via Visual Cross-Validation & Fallback
+    // Button originally clicked at (50, 50), now moved far away to (1800, 900) on a 2560x1440 screen
+    HDC hdcScr13 = GetDC(NULL);
+    HDC hdcMem13 = CreateCompatibleDC(hdcScr13);
+    HBITMAP hBmpCanvas13 = CreateCompatibleBitmap(hdcScr13, 2560, 1440);
+    SelectObject(hdcMem13, hBmpCanvas13);
+
+    RECT rcBg13 = { 0, 0, 2560, 1440 };
+    HBRUSH hbrBg13 = CreateSolidBrush(RGB(245, 245, 245));
+    FillRect(hdcMem13, &rcBg13, hbrBg13);
+    DeleteObject(hbrBg13);
+
+    DWORD tBtnSize = 0;
+    BYTE* tBtnBmp = create_test_pattern_bmp(64, 32, &tBtnSize);
+    int dispX = 1800, dispY = 900;
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 64; x++) {
+            BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 230 : 20;
+            SetPixel(hdcMem13, dispX + x, dispY + y, RGB(v, v, v));
+        }
+    }
+
+    ttp_engine_set_screen_dc_override(hdcMem13);
+    s_timeoutTriggered = 0;
+
+    TTPStep stepDisplaced;
+    memset(&stepDisplaced, 0, sizeof(stepDisplaced));
+    stepDisplaced.stepId = 130;
+    stepDisplaced.actionType = TTP_ACTION_CLICK;
+    stepDisplaced.targetMode = TTP_TARGET_TEXT; // Recorded as TEXT
+    strcpy(stepDisplaced.textKey, "TestApp_Container_XYZ"); // Same text as container window!
+    stepDisplaced.origX = 50;
+    stepDisplaced.origY = 50;
+    stepDisplaced.timeoutMs = 1000;
+    stepDisplaced.postDelayMs = 0;
+
+    BOOL playDispRes = ttp_playback_step(&stepDisplaced, tBtnBmp, tBtnSize, NULL);
+    ttp_engine_set_screen_dc_override(NULL);
+
+    printf("Test 13B (Displaced Recovery): playDispRes=%d, timeoutTriggered=%d\n", playDispRes, s_timeoutTriggered);
+    fflush(stdout);
+    assert(s_timeoutTriggered == 0);
+    assert(playDispRes == TRUE);
+
+    DeleteObject(hBmpCanvas13);
+    DeleteDC(hdcMem13);
+    ReleaseDC(NULL, hdcScr13);
+    free(tBtnBmp);
+    DestroyWindow(hContainer);
+    UnregisterClassA("TTP_TestTopCls", GetModuleHandleA(NULL));
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");

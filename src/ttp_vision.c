@@ -1218,6 +1218,21 @@ static BOOL check_and_add_window(HWND hwnd, TextSearchContext* ctx) {
         return TRUE;
     }
 
+    /* Reject top-level container windows or giant panels:
+     * Buttons, icons, and clickable controls are compact elements (width <= 360, height <= 180).
+     * Entire application main windows or large container panels must never be added as click targets! */
+    int winW = rc.right - rc.left;
+    int winH = rc.bottom - rc.top;
+    HWND hParent = GetParent(hwnd);
+    HWND hRoot = GetAncestor(hwnd, GA_ROOT);
+    BOOL isTopLevel = (hParent == NULL || hRoot == hwnd);
+
+    if (isTopLevel || winW > 360 || winH > 180) {
+        // This is a container / top-level window. Do NOT add its center as a click target.
+        // Return TRUE so EnumWindows/EnumChildWindows continues down to its child controls.
+        return TRUE;
+    }
+
     POINT pt = { (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
     if (pt.x < 0 || pt.y < 0 || pt.x >= screenW || pt.y >= screenH) return TRUE;
 
