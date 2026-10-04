@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
 #include "ttp_core.h"
 #include "ttp_storage.h"
@@ -426,9 +425,31 @@ static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) 
     snprintf(buf, bufSize, "%.1fs %s", sec, pol);
 }
 
+static double parse_seconds(const char* s) {
+    if (!s) return 0.0;
+    while (*s == ' ' || *s == '\t') s++;
+    double val = 0.0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10.0 + (*s - '0');
+        s++;
+    }
+    if (*s == '.') {
+        s++;
+        double frac = 0.0;
+        double div = 1.0;
+        while (*s >= '0' && *s <= '9') {
+            frac = frac * 10.0 + (*s - '0');
+            div *= 10.0;
+            s++;
+        }
+        val += frac / div;
+    }
+    return val;
+}
+
 static void ParseTimeoutString(const char* str, DWORD* outTimeoutMs, int* outAction) {
     while (*str == ' ' || *str == '\t') str++;
-    double sec = atof(str);
+    double sec = parse_seconds(str);
     if (sec <= 0.05) sec = 0.1;
     if (sec > 300.0) sec = 300.0;
     if (outTimeoutMs) *outTimeoutMs = (DWORD)(sec * 1000.0 + 0.5);
@@ -1083,7 +1104,7 @@ static void CommitInPlaceEdit(BOOL save) {
     if (save && item >= 0 && item < (int)g_stepCount) {
         char buf[64] = {0};
         GetWindowTextA(hEdit, buf, sizeof(buf));
-        double sec = atof(buf);
+        double sec = parse_seconds(buf);
         if (sec <= 0.05) sec = 0.1;
         if (sec > 300.0) sec = 300.0;
         g_steps[item].timeoutMs = (DWORD)(sec * 1000.0);

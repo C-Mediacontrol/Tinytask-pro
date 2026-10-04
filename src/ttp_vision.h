@@ -8,6 +8,12 @@
 extern "C" {
 #endif
 
+/* Fast 64-bit integer square root without floating point or CRT math.h */
+unsigned long ttp_isqrt(unsigned long long n);
+
+/* Fast hardware-based Newton-Raphson double square root without CRT math.h */
+double ttp_sqrt(double x);
+
 /* Euclidean Distance calculation */
 double ttp_calc_euclidean_dist(LONG x1, LONG y1, LONG x2, LONG y2);
 

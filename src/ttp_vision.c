@@ -2,8 +2,46 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <oleacc.h>
+
+/* Fast 64-bit integer square root without floating point or CRT math.h */
+unsigned long ttp_isqrt(unsigned long long n) {
+    unsigned long long res = 0;
+    unsigned long long bit = 1ULL << 62;
+    while (bit > n) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (n >= res + bit) {
+            n -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (unsigned long)res;
+}
+
+/* Fast hardware-based Newton-Raphson double square root without CRT math.h */
+double ttp_sqrt(double x) {
+    if (x <= 0.0) {
+        return 0.0;
+    }
+    union {
+        double d;
+        unsigned long long u;
+    } conv;
+    conv.d = x;
+    conv.u = (conv.u >> 1) + 0x1ff0000000000000ULL;
+    double y = conv.d;
+    y = 0.5 * (y + x / y);
+    y = 0.5 * (y + x / y);
+    y = 0.5 * (y + x / y);
+    y = 0.5 * (y + x / y);
+    y = 0.5 * (y + x / y);
+    return y;
+}
 
 /* =========================================================================
  * 1. Euclidean Distance & Spatial Disambiguation
@@ -12,7 +50,7 @@
 double ttp_calc_euclidean_dist(LONG x1, LONG y1, LONG x2, LONG y2) {
     double dx = (double)(x1 - x2);
     double dy = (double)(y1 - y2);
-    return sqrt(dx * dx + dy * dy);
+    return ttp_sqrt(dx * dx + dy * dy);
 }
 
 int ttp_pick_nearest_candidate(LONG origX, LONG origY, const POINT* candidates, int count) {
@@ -100,7 +138,7 @@ BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, 
         }
     }
 
-    double sigmaB = sqrt(varSum / (double)borderCount);
+    double sigmaB = ttp_sqrt(varSum / (double)borderCount);
     if (sigmaB > 60.0) {
         /* Safety fallback: border variance too high, revert mask to all 1s */
         return TRUE;
@@ -814,7 +852,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
         double d = T[i] - meanT;
         sumSqDiffT += d * d;
     }
-    double denomT = sqrt(sumSqDiffT);
+    double denomT = ttp_sqrt(sumSqDiffT);
 
     if (denomT < 1e-6) {
         free(T);
@@ -861,7 +899,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                 double d = T2[i] - meanT2;
                 sumSqDiffT2 += d * d;
             }
-            double denomT2 = sqrt(sumSqDiffT2);
+            double denomT2 = ttp_sqrt(sumSqDiffT2);
             nT2 = (double*)malloc(N2 * sizeof(double));
             if (nT2) {
                 if (denomT2 > 1e-6) {
@@ -1001,7 +1039,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                         double varI = sumI2 - (sumI * sumI) / N2;
                         if (varI <= 25.0) continue;
 
-                        double denomI = sqrt(varI);
+                        double denomI = ttp_sqrt(varI);
                         double num = 0.0;
                         for (int v = 0; v < TH2; v++) {
                             const double* pS2 = &S2[(y2 + v) * W2 + x2];
@@ -1071,7 +1109,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                             }
                             double varI = sumI2 - (sumI * sumI) / N;
                             if (varI <= 25.0) continue;
-                            double score = num / sqrt(varI);
+                            double score = num / ttp_sqrt(varI);
                             if (score > bestScore) {
                                 bestScore = score;
                                 bestX = x;
@@ -1106,7 +1144,7 @@ BOOL ttp_match_template_ncc(HDC hdcScreen, int screenW, int screenH, const BYTE*
                 }
                 double varI = sumI2 - (sumI * sumI) / N;
                 if (varI <= 25.0) continue;
-                double score = num / sqrt(varI);
+                double score = num / ttp_sqrt(varI);
                 if (score > bestScore) {
                     bestScore = score;
                     bestX = x;
@@ -1206,7 +1244,7 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
         double d = T[i] - meanT;
         sumSqDiffT += d * d;
     }
-    double denomT = sqrt(sumSqDiffT);
+    double denomT = ttp_sqrt(sumSqDiffT);
     if (denomT < 1e-6) {
         free(T);
         SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem);
@@ -1257,7 +1295,7 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
                          - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
             double varI = sumI2 - (sumI * sumI) / N;
             if (varI <= 25.0) continue;
-            double denomI = sqrt(varI);
+            double denomI = ttp_sqrt(varI);
             double num = 0.0;
             for (int v = 0; v < th; v++) {
                 const double* pS = &S[(y + v) * roiW + x];
@@ -1285,7 +1323,7 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
                              - sat2[y2 * satStride + x1] + sat2[y1 * satStride + x1];
                 double varI = sumI2 - (sumI * sumI) / N;
                 if (varI <= 25.0) continue;
-                double denomI = sqrt(varI);
+                double denomI = ttp_sqrt(varI);
                 double num = 0.0;
                 for (int v = 0; v < th; v++) {
                     const double* pS = &S[(y + v) * roiW + x];
