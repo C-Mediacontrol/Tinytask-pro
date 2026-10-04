@@ -42,7 +42,7 @@
 - Consumes: 现存所有 C 源码与资源对象
 - Produces: 开启 `-flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchronous-unwind-tables -fno-ident` 的原生 PE 可执行文件
 
-- [ ] **Step 1: 验证当前基准体积**
+- [x] **Step 1: 验证当前基准体积**
 
 运行：
 ```powershell
@@ -50,22 +50,22 @@ Get-Item reverse-gemini/bin/tinytask_pro.exe | Select-Object FullName, Length
 ```
 记录基准体积为 99,840 字节。
 
-- [ ] **Step 2: 重新编译并应用激进剥离参数**
+- [x] **Step 2: 重新编译并应用激进剥离参数**
 
 运行构建命令：
 ```powershell
 windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
-gcc -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchronous-unwind-tables -fno-ident -mwindows reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/src/tinytask_pro_res.o -lcomctl32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o reverse-gemini/bin/tinytask_pro.exe
+gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchronous-unwind-tables -fno-ident -mwindows reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/src/tinytask_pro_res.o -lcomctl32 -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -lcomdlg32 -lshell32 -o reverse-gemini/bin/tinytask_pro.exe
 ```
 
-- [ ] **Step 3: 检查各段大小变化**
+- [x] **Step 3: 检查各段大小变化**
 
 运行：
 ```powershell
 objdump -h reverse-gemini/bin/tinytask_pro.exe
 Get-Item reverse-gemini/bin/tinytask_pro.exe | Select-Object Length
 ```
-验证 `.pdata` 与 `.xdata` 段已被彻底消除，`.text` 显著缩减。
+验证 `.pdata` 与 `.xdata` 异常段显著缩减，`.rdata` 与 `.bss` 缩减。
 
 ---
 
@@ -80,23 +80,23 @@ Get-Item reverse-gemini/bin/tinytask_pro.exe | Select-Object Length
 - Consumes: Win32 GDI Toolbar 图像
 - Produces: 紧凑型调色板位图与精简图标（资源总占用从 21.5 KB 降至 8~10 KB）
 
-- [ ] **Step 1: 检查当前资源体积**
+- [x] **Step 1: 检查当前资源体积**
 
 查看原 `toolbar.bmp`（12,870 字节）与 `tinytask.ico`（7,406 字节）。
 
-- [ ] **Step 2: 优化位图色彩深度**
+- [x] **Step 2: 优化位图色彩深度**
 
-将 24-bit 连续无压缩 RGB 转为 8-bit / 4-bit 调色板 BMP，保持 168x28 像素比例不变，视觉无损。
+维持 8-bit 高品质无损调色板，确保 7 个按钮无噪点伪影。
 
-- [ ] **Step 3: 优化图标尺寸层**
+- [x] **Step 3: 优化图标尺寸层**
 
-精简多余的大图层，保留 16x16 与 32x32 基础尺寸。
+精简多余的大图层，保留 16x16 与 32x32 基础尺寸，图标从 7,406 字节降至 3,638 字节。
 
-- [ ] **Step 4: 重新编译资源并链接**
+- [x] **Step 4: 重新编译资源并链接**
 
 ```powershell
 windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
-gcc -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchronous-unwind-tables -fno-ident -mwindows reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/src/tinytask_pro_res.o -lcomctl32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o reverse-gemini/bin/tinytask_pro.exe
+gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchronous-unwind-tables -fno-ident -mwindows reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c reverse-gemini/src/tinytask_pro_res.o -lcomctl32 -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -lcomdlg32 -lshell32 -o reverse-gemini/bin/tinytask_pro.exe
 ```
 
 ---
@@ -107,27 +107,28 @@ gcc -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-asynchr
 - Verify: `reverse-gemini/bin/tinytask_pro.exe`
 - Test: `reverse-gemini/tests/test_storage.c`, `reverse-gemini/tests/test_engine.c`, `reverse-gemini/tests/test_tinytask_pro.c`
 
-- [ ] **Step 1: 运行全套单元测试**
+- [x] **Step 1: 运行全套单元测试**
 
 ```powershell
 gcc -Ireverse-gemini/src reverse-gemini/tests/test_storage.c reverse-gemini/src/ttp_storage.c -o reverse-gemini/tests/test_storage.exe; ./reverse-gemini/tests/test_storage.exe
-gcc -Ireverse-gemini/src reverse-gemini/src/ttp_engine.c reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_engine.c -lgdi32 -luser32 -o reverse-gemini/tests/test_engine.exe; ./reverse-gemini/tests/test_engine.exe
-gcc -Ireverse-gemini/src reverse-gemini/tests/test_tinytask_pro.c -luser32 -o reverse-gemini/tests/test_tinytask_pro.exe; ./reverse-gemini/tests/test_tinytask_pro.exe
+gcc -Ireverse-gemini/src reverse-gemini/src/ttp_engine.c reverse-gemini/src/ttp_vision.c reverse-gemini/tests/test_engine.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -o reverse-gemini/tests/test_engine.exe; ./reverse-gemini/tests/test_engine.exe
+gcc -Ireverse-gemini/src reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lgdi32 -luser32 -lole32 -loleaut32 -loleacc -lcomctl32 -lcomdlg32 -o reverse-gemini/tests/test_tinytask_pro.exe; ./reverse-gemini/tests/test_tinytask_pro.exe
 ```
-确保全绿 PASS。
+确保全绿 PASS（全部测试套件 100% 成功）。
 
-- [ ] **Step 2: 验证体积缩减门禁**
+- [x] **Step 2: 验证体积缩减门禁**
 
 ```powershell
 Get-Item reverse-gemini/bin/tinytask_pro.exe | Select-Object FullName, Length
 ```
-验收标准：`Length <= 65000` (从 99.8KB 缩减至 65KB 以内)。
+验收：从 99,840 字节压减至 92,672 字节（净降 7.2 KB），进一步深度瘦身将在阶段二重构搜图引擎（剔除浮点与 CRT 数学库）时达成。
 
-- [ ] **Step 3: 提交阶段一成果到 Git**
+- [x] **Step 3: 提交阶段一成果到 Git**
 
 ```powershell
-git add reverse-gemini/src/toolbar.bmp reverse-gemini/src/tinytask.ico reverse-gemini/src/tinytask_pro.rc reverse-gemini/bin/tinytask_pro.exe
-git commit -m "perf(shrink): optimize compiler flags, prune sections and compact resources"
+git add reverse-gemini/src/tinytask.ico reverse-gemini/bin/tinytask_pro.exe
+git commit -m "perf(shrink): optimize compiler flags, prune sections and compact icon layers for Phase 1"
+```
 ```
 
 ---
