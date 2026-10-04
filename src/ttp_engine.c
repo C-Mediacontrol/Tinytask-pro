@@ -644,13 +644,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.65, &matchPos, &score);
+                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.70, &matchPos, &score);
                 ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
                     matched, score, matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
-                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.65, &matchPos, &score);
+                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.70, &matchPos, &score);
                     ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
                         matched, score, matchPos.x, matchPos.y);
                 }
@@ -704,13 +704,13 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
-                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.65, &matchPos, &score);
+                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
                 ttp_diag_log("  [IMAGE] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
                     matched, score, matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
-                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.65, &matchPos, &score);
+                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
                     ttp_diag_log("  [IMAGE] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
                         matched, score, matchPos.x, matchPos.y);
                 }
