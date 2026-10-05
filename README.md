@@ -1,13 +1,13 @@
 # TinyTask Pro
 
 > **下一代超轻量级桌面自动化与 RPA / Next-Generation Ultra-Lightweight Desktop Automation & RPA**  
-> *纯 C 语言 & 原生 Win32 | 零 CRT 运行时依赖 (Zero-CRT) | 单独立二进制 (~84.4 KB) | 遵循 MIT 开源协议*  
-> *Pure C99 & Native Win32 | Zero CRT Dependencies | Single Standalone Binary (~84.4 KB) | MIT Licensed*
+> *纯 C 语言 & 原生 Win32 | 零 CRT 运行时依赖 (Zero-CRT) | 单独立二进制 (69.0 KB x86 / 75.5 KB x64) | 遵循 MIT 开源协议*  
+> *Pure C99 & Native Win32 | Zero CRT Dependencies | Single Standalone Binary (69.0 KB x86 / 75.5 KB x64) | MIT Licensed*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Language: C99](https://img.shields.io/badge/Language-C99-blue.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%207%20--%2011-lightgrey.svg)](https://www.microsoft.com/windows)
-[![Binary Size](https://img.shields.io/badge/Binary%20Size-84.4%20KB%20(Zero--CRT)-brightgreen.svg)](#9-源码构建与测试指南)
+[![Binary Size](https://img.shields.io/badge/Binary%20Size-69.0%20KB%20(Zero--CRT)-brightgreen.svg)](#9-源码构建与测试指南)
 [![Tests: 47 Passing](https://img.shields.io/badge/Tests-47%20Passing-success.svg)](#9-源码构建与测试指南)
 
 ---
@@ -46,7 +46,7 @@
 传统机器人流程自动化（RPA）工具（如 Microsoft Power Automate Desktop、UiPath、AutoHotkey 庞大运行时、各种 Python/PyAutoGUI 方案）动辄需要数百兆乃至数吉字节的运行环境依赖（.NET Framework、Python 解释器、Electron、Chromium 内核等）。这使得轻量级运维、嵌入式测试或无网络隔离环境下的自动化部署极为沉重。
 
 **TinyTask Pro** 彻底打破这一局限：
-* **极限体积与零依赖**：基于纯 C99 语言与原生 Win32 API 打造，整个软件为**单个独立可执行文件，体积仅约 84.4 KB**，彻底剥离 C 运行时库（Zero-CRT），无需安装任何运行库，拷入即用；
+* **极限体积与零依赖**：基于纯 C99 语言与原生 Win32 API 打造，整个软件为**单个独立可执行文件，体积仅 69.0 KB (x86) / 75.5 KB (x64)**，彻底剥离 C 运行时库（Zero-CRT），无需安装任何运行库，拷入即用；
 * **双通道智能定位**：融合了计算机视觉（CV）与操作系统原生无障碍树（MSAA / UI Automation），彻底告别传统宏录制工具“窗口一挪动、分辨率一变就点击落空”的致命痛点；
 * **企业级稳健性**：内建两级级联检索、字形穿透与内衬空白区隔离算法、空间欧氏距离消歧以及五重超时恢复策略。
 
@@ -196,7 +196,7 @@ TinyTask Pro 摒弃了将宏脚本与图片零散存放在文件夹中的脆弱�
 
 | 核心指标 / 功能 | TinyTask 1.77 经典版 | TinyTask Pro 专业版 | 传统商业 RPA (Power Automate / UiPath) |
 |---|---|---|---|
-| **二进制体积** | ~35 KB | **~92 KB (单文件独立)** | 500 MB ~ 2 GB 运行环境 |
+| **二进制体积** | ~35 KB | **~69 KB (x86) / ~75 KB (x64)** | 500 MB ~ 2 GB 运行环境 |
 | **运行时依赖** | 无 (纯 Win32) | **无 (原生 Win32 / GDI, 0 `<math.h>`/`-lm`)** | .NET / Python / Node / Chromium |
 | **元素定位机制** | 仅绝对物理坐标 $(X,Y)$ | **透明掩码分层视觉 + 无障碍文本树** | UI 选择器 / DOM / 云端 OCR |
 | **壁纸变色抗扰度**| 无（纯坐标） | **极高（掩码将无关背景权重置零，得分从 0.13 跃升至 1.0000）** | 弱（颜色变化极易匹配失效） |
@@ -217,28 +217,46 @@ TinyTask Pro 摒弃了将宏脚本与图片零散存放在文件夹中的脆弱�
 * 编译器：MinGW-w64 GCC (包含原生 Windows SDK 头文件与库，**无需任何数学或浮点库**)
 
 ### 一键编译 Release 可执行文件：
+
+#### 1. 32 位极致轻量版 (x86 - 69.0 KB)：
 ```bash
-# 1. 编译原生 Win32 资源文件 (图标、紧凑 8bpp 工具栏位图、ComCtl 6.0 Manifest)
+windres -F pe-i386 reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res32.o
+
+gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe -fno-stack-protector -fno-exceptions \
+    -fomit-frame-pointer -fno-ident -fmerge-all-constants \
+    -ffunction-sections -fdata-sections \
+    -fno-unwind-tables -fno-asynchronous-unwind-tables \
+    "-Wl,--gc-sections,--disable-reloc-section,-e,_WinMainCRTStartup" \
+    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
+    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
+    reverse-gemini/src/tinytask_pro_res32.o \
+    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
+    -lole32 -loleaut32 -loleacc -luuid -lgcc \
+    -o reverse-gemini/bin/tinytask_pro_x86.exe
+
+rm reverse-gemini/src/tinytask_pro_res32.o
+```
+输出文件：[`reverse-gemini/bin/tinytask_pro_x86.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro_x86.exe)（**70,656 字节 / 69.0 KB，0 CRT 依赖**）。
+
+#### 2. 64 位原生版 (x64 - 75.5 KB)：
+```bash
 windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
 
-# 2. 编译并链接独立二进制 (零 CRT 运行时，启用 -nostdlib、LTO 跨模块优化与段对齐精简)
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section" \
-    reverse-gemini/src/tinytask_pro.c \
-    reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c \
-    reverse-gemini/src/ttp_engine.c \
+    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
+    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
     reverse-gemini/src/tinytask_pro_res.o \
-    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -lole32 -loleaut32 -loleacc \
+    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
+    -lole32 -loleaut32 -loleacc \
     -o reverse-gemini/bin/tinytask_pro.exe
 
-# 3. 清理临时资源对象
 rm reverse-gemini/src/tinytask_pro_res.o
 ```
-编译后可在 [`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe) 查看输出文件，大小仅为 **84.4 KB (84,480 字节)**，**0 处 CRT DLL 依赖**。
+输出文件：[`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe)（**77,312 字节 / 75.5 KB，0 CRT 依赖**）。
 
 ### 运行全套 8 大单元与回归测试套件 (47+ 项全绿)：
 ```bash
@@ -279,7 +297,7 @@ gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_fix_repro.c reverse-gemin
 Traditional desktop RPA tools (such as Microsoft Power Automate Desktop, UiPath, AutoHotkey runtimes, and bulky Python/PyAutoGUI scripts) mandate gigabytes of runtime dependencies (.NET Framework, Python environments, Electron, or Chromium runtimes). This creates prohibitive barriers for lightweight operations, embedded system testing, air-gapped secure workstations, or instant automated deployment.
 
 **TinyTask Pro** completely eliminates this footprint:
-* **Radical Portability (~84.4 KB)**: Crafted entirely in pure C99 and native Win32 APIs, compiling into a **single standalone binary of ~84.4 KB (84,480 bytes)** with zero C runtime (Zero-CRT) dependencies (`msvcrt.dll` and `ucrtbase.dll` completely eliminated).
+* **Radical Portability (69.0 KB x86 / 75.5 KB x64)**: Crafted entirely in pure C99 and native Win32 APIs, compiling into a **single standalone binary of 69.0 KB (x86) / 75.5 KB (x64)** with zero C runtime (Zero-CRT) dependencies (`msvcrt.dll` and `ucrtbase.dll` completely eliminated).
 * **Dual-Track Target Localization & Chromakey Masking**: Combines computer vision (CV) with native Windows accessibility structures (MSAA / UI Automation). Features 4-neighbor BFS border color flood-fill to carve away irrelevant desktop wallpaper colors into 32bpp BGRA masks, eradicating missed matches when controls migrate across disparate background colors.
 * **Production-Grade Reliability**: Features zero-heap Probe SAD coarse filtering, Masked Normalized Cross-Correlation (Masked NCC), UIED-inspired glyph-through padding gap bounding, Euclidean spatial disambiguation, and an interactive 60FPS checkerboard step configuration dialog.
 
@@ -421,28 +439,46 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 ## 9. Build Instructions & Test Suites
 
 ### Build Release Executable:
+
+#### 1. Ultra-Compact 32-bit (x86 - 69.0 KB):
 ```bash
-# 1. Compile native Win32 resources (icon, compact 8bpp toolbar, ComCtl 6.0 manifest)
+windres -F pe-i386 reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res32.o
+
+gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe -fno-stack-protector -fno-exceptions \
+    -fomit-frame-pointer -fno-ident -fmerge-all-constants \
+    -ffunction-sections -fdata-sections \
+    -fno-unwind-tables -fno-asynchronous-unwind-tables \
+    "-Wl,--gc-sections,--disable-reloc-section,-e,_WinMainCRTStartup" \
+    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
+    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
+    reverse-gemini/src/tinytask_pro_res32.o \
+    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
+    -lole32 -loleaut32 -loleacc -luuid -lgcc \
+    -o reverse-gemini/bin/tinytask_pro_x86.exe
+
+rm reverse-gemini/src/tinytask_pro_res32.o
+```
+Resulting binary: [`reverse-gemini/bin/tinytask_pro_x86.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro_x86.exe) (**69.0 KB, 70,656 bytes**, with **0 CRT DLL dependencies**).
+
+#### 2. Native 64-bit (x64 - 75.5 KB):
+```bash
 windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
 
-# 2. Compile and link standalone binary (Zero-CRT with -nostdlib, LTO, and section alignment optimization)
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section" \
-    reverse-gemini/src/tinytask_pro.c \
-    reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c \
-    reverse-gemini/src/ttp_engine.c \
+    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
+    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
     reverse-gemini/src/tinytask_pro_res.o \
-    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -lole32 -loleaut32 -loleacc \
+    -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
+    -lole32 -loleaut32 -loleacc \
     -o reverse-gemini/bin/tinytask_pro.exe
 
-# 3. Clean up temporary resource object
 rm reverse-gemini/src/tinytask_pro_res.o
 ```
-Resulting binary: [`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe) (**84.4 KB, 84,480 bytes**, with **0 CRT DLL dependencies**).
+Resulting binary: [`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe) (**75.5 KB, 77,312 bytes**, with **0 CRT DLL dependencies**).
 
 ### Run Test Suites (47+ Tests Passing):
 ```bash

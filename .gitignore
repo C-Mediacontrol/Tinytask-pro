@@ -6,6 +6,7 @@
 # Test executables (keep release binaries in bin/)
 *.exe
 !bin/tinytask_pro.exe
+!bin/tinytask_pro_x86.exe
 !bin/tinytask.exe
 
 # Editor & IDE files

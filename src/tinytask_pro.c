@@ -24,6 +24,19 @@ static int ttp_memcmp8(const void* a, const void* b) {
     return 0;
 }
 
+void* memmove(void* dest, const void* src, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+    if (d < s) {
+        while (n--) *d++ = *s++;
+    } else {
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dest;
+}
+
 #include "ttp_core.h"
 #include "ttp_storage.h"
 #include "ttp_vision.h"
@@ -140,6 +153,7 @@ static HWND  g_hToolTip = NULL;
 static BOOL  g_IsStandalonePayload = FALSE;
 
 /* Toolbar Resources */
+#include "toolbar_lznt1.h"
 static HBITMAP g_hBmpToolbar = NULL;
 static HBITMAP g_hBmpMask = NULL;
 static BOOL    g_HasCustomToolbar = FALSE;
@@ -1048,7 +1062,35 @@ static void CreateToolbarBitmaps(void) {
         g_hBmpToolbar = (HBITMAP)LoadImageA(NULL, g_CustomToolbarPath, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
     }
     if (!g_hBmpToolbar) {
-        g_hBmpToolbar = (HBITMAP)LoadImageA(g_hInstance, MAKEINTRESOURCEA(4002), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+        typedef LONG (NTAPI *PFN_RtlDecompressBuffer)(
+            USHORT CompressionFormat,
+            PUCHAR UncompressedBuffer,
+            ULONG  UncompressedBufferSize,
+            PUCHAR CompressedBuffer,
+            ULONG  CompressedBufferSize,
+            PULONG FinalUncompressedSize
+        );
+        HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+        PFN_RtlDecompressBuffer pRtlDecompressBuffer = hNtdll ? (PFN_RtlDecompressBuffer)GetProcAddress(hNtdll, "RtlDecompressBuffer") : NULL;
+
+        BYTE* rawBmp = (BYTE*)HeapAlloc(GetProcessHeap(), 0, TOOLBAR_UNCOMPRESSED_SIZE);
+        if (rawBmp) {
+            ULONG finalSize = 0;
+            if (pRtlDecompressBuffer && pRtlDecompressBuffer(2, (PUCHAR)rawBmp, TOOLBAR_UNCOMPRESSED_SIZE, (PUCHAR)g_ToolbarLznt1, TOOLBAR_COMPRESSED_SIZE, &finalSize) == 0 && finalSize == TOOLBAR_UNCOMPRESSED_SIZE) {
+                const BITMAPFILEHEADER* bmfh = (const BITMAPFILEHEADER*)rawBmp;
+                const BITMAPINFO* bmi = (const BITMAPINFO*)(rawBmp + sizeof(BITMAPFILEHEADER));
+                const void* pBits = rawBmp + bmfh->bfOffBits;
+                HDC hdcScr = GetDC(NULL);
+                void* pDIBBits = NULL;
+                g_hBmpToolbar = CreateDIBSection(hdcScr, bmi, DIB_RGB_COLORS, &pDIBBits, NULL, 0);
+                if (g_hBmpToolbar && pDIBBits) {
+                    DWORD imgBytes = TOOLBAR_UNCOMPRESSED_SIZE - bmfh->bfOffBits;
+                    __builtin_memcpy(pDIBBits, pBits, imgBytes);
+                }
+                ReleaseDC(NULL, hdcScr);
+            }
+            HeapFree(GetProcessHeap(), 0, rawBmp);
+        }
         g_HasCustomToolbar = FALSE;
     }
     CreateToolbarMask();

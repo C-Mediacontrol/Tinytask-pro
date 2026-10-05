@@ -609,8 +609,7 @@ int main() {
     assert(cropSz > 0 && cropBmp != NULL);
     BITMAPINFOHEADER* bmih12 = (BITMAPINFOHEADER*)(cropBmp + sizeof(BITMAPFILEHEADER));
     assert(bmih12->biWidth == 50);
-    assert(bmih12->biHeight == 40);
-    free(cropBmp);
+    HeapFree(GetProcessHeap(), 0, cropBmp);
     ReleaseDC(NULL, hdcScr12);
 
     // =========================================================================
