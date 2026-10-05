@@ -1,8 +1,7 @@
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "ttp_core.h"
 #include "ttp_vision.h"
@@ -53,7 +52,12 @@ static LONG g_textStartY = 0;
 static BOOL synth_add_action(const SynthAction* act) {
     if (g_actionCount >= g_actionCap) {
         DWORD newCap = (g_actionCap == 0) ? 64 : g_actionCap * 2;
-        SynthAction* newBuf = (SynthAction*)realloc(g_actions, newCap * sizeof(SynthAction));
+        SynthAction* newBuf;
+        if (!g_actions) {
+            newBuf = (SynthAction*)HeapAlloc(GetProcessHeap(), 0, newCap * sizeof(SynthAction));
+        } else {
+            newBuf = (SynthAction*)HeapReAlloc(GetProcessHeap(), 0, g_actions, newCap * sizeof(SynthAction));
+        }
         if (!newBuf) return FALSE;
         g_actions = newBuf;
         g_actionCap = newCap;
@@ -65,7 +69,7 @@ static BOOL synth_add_action(const SynthAction* act) {
 static void synth_flush_text(void) {
     if (g_textLen > 0) {
         SynthAction act;
-        memset(&act, 0, sizeof(act));
+        __builtin_memset(&act, 0, sizeof(act));
         act.actionType = TTP_ACTION_TYPE_TEXT;
         act.targetMode = TTP_TARGET_COORD;
         act.origX = g_textStartX;
@@ -74,10 +78,10 @@ static void synth_flush_text(void) {
         act.destY = g_textStartY;
         act.timeoutMs = 3000;
         act.postDelayMs = 100;
-        strncpy(act.textKey, g_textBuffer, sizeof(act.textKey) - 1);
+        lstrcpynA(act.textKey, g_textBuffer, sizeof(act.textKey));
         synth_add_action(&act);
 
-        memset(g_textBuffer, 0, sizeof(g_textBuffer));
+        __builtin_memset(g_textBuffer, 0, sizeof(g_textBuffer));
         g_textLen = 0;
     }
 }
@@ -103,7 +107,7 @@ void ttp_synth_reset(void) {
 
     g_lastClickTime = 0;
 
-    memset(g_textBuffer, 0, sizeof(g_textBuffer));
+    __builtin_memset(g_textBuffer, 0, sizeof(g_textBuffer));
     g_textLen = 0;
     g_textStartX = 0;
     g_textStartY = 0;
@@ -141,7 +145,7 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
         if (dist > dragThresh) {
             /* Drag threshold exceeded -> TTP_ACTION_DRAG */
             SynthAction act;
-            memset(&act, 0, sizeof(act));
+            __builtin_memset(&act, 0, sizeof(act));
             act.actionType = TTP_ACTION_DRAG;
             act.targetMode = TTP_TARGET_COORD;
             act.origX = g_lDownX;
@@ -178,7 +182,7 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
 
             if (!isDbl) {
                 SynthAction act;
-                memset(&act, 0, sizeof(act));
+                __builtin_memset(&act, 0, sizeof(act));
                 act.actionType = TTP_ACTION_CLICK;
                 act.targetMode = TTP_TARGET_COORD;
                 act.origX = g_lDownX;
@@ -210,7 +214,7 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
         synth_flush_text();
 
         SynthAction act;
-        memset(&act, 0, sizeof(act));
+        __builtin_memset(&act, 0, sizeof(act));
         act.actionType = TTP_ACTION_RCLICK;
         act.targetMode = TTP_TARGET_COORD;
         act.origX = g_rDownX;
@@ -231,7 +235,7 @@ void ttp_synth_add_mouse_event(DWORD uMsg, LONG x, LONG y, DWORD timestamp) {
             g_actions[g_actionCount - 1].actionType = TTP_ACTION_DBLCLICK;
         } else {
             SynthAction act;
-            memset(&act, 0, sizeof(act));
+            __builtin_memset(&act, 0, sizeof(act));
             act.actionType = TTP_ACTION_DBLCLICK;
             act.targetMode = TTP_TARGET_COORD;
             act.origX = x;
@@ -277,7 +281,7 @@ void ttp_synth_add_key_event(DWORD vkCode, BOOL isDown, DWORD timestamp) {
         synth_flush_text();
 
         SynthAction act;
-        memset(&act, 0, sizeof(act));
+        __builtin_memset(&act, 0, sizeof(act));
         act.actionType = TTP_ACTION_HOTKEY;
         act.targetMode = TTP_TARGET_COORD;
         act.origX = (LONG)vkCode;
@@ -285,7 +289,7 @@ void ttp_synth_add_key_event(DWORD vkCode, BOOL isDown, DWORD timestamp) {
         act.timeoutMs = 3000;
         act.postDelayMs = 100;
         act.timestamp = timestamp;
-        snprintf(act.textKey, sizeof(act.textKey), "%lu", (unsigned long)vkCode);
+        wsprintfA(act.textKey, "%lu", (unsigned long)vkCode);
         synth_add_action(&act);
     } else {
         /* Printable key -> aggregate into typing buffer */
@@ -319,7 +323,7 @@ DWORD ttp_synth_finalize(TTPStep* outSteps, DWORD maxSteps) {
     if (outSteps && maxSteps > 0) {
         DWORD copyCount = (total < maxSteps) ? total : maxSteps;
         for (DWORD i = 0; i < copyCount; i++) {
-            memset(&outSteps[i], 0, sizeof(TTPStep));
+            __builtin_memset(&outSteps[i], 0, sizeof(TTPStep));
             outSteps[i].stepId = i + 1;
             outSteps[i].actionType = g_actions[i].actionType;
             outSteps[i].targetMode = g_actions[i].targetMode ? g_actions[i].targetMode : TTP_TARGET_COORD;
@@ -329,7 +333,7 @@ DWORD ttp_synth_finalize(TTPStep* outSteps, DWORD maxSteps) {
             outSteps[i].destY = g_actions[i].destY;
             outSteps[i].timeoutMs = g_actions[i].timeoutMs ? g_actions[i].timeoutMs : 3000;
             outSteps[i].postDelayMs = g_actions[i].postDelayMs ? g_actions[i].postDelayMs : 100;
-            strncpy(outSteps[i].textKey, g_actions[i].textKey, sizeof(outSteps[i].textKey) - 1);
+            lstrcpynA(outSteps[i].textKey, g_actions[i].textKey, sizeof(outSteps[i].textKey));
         }
         return copyCount;
     }
@@ -383,10 +387,10 @@ static LRESULT CALLBACK TimeoutDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 void ttp_register_timeout_dialog_class(HINSTANCE hInst) {
     if (!hInst) hInst = GetModuleHandleA(NULL);
     WNDCLASSEXA wc;
-    memset(&wc, 0, sizeof(wc));
+    __builtin_memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);
     if (!GetClassInfoExA(hInst, "TTPTimeoutDialog", &wc)) {
-        memset(&wc, 0, sizeof(wc));
+        __builtin_memset(&wc, 0, sizeof(wc));
         wc.cbSize = sizeof(wc);
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = TimeoutDlgProc;
@@ -435,7 +439,7 @@ int ttp_show_timeout_dialog(HWND hParent, const TTPStep* step) {
     char msgText[256];
     const char* modeStr = (step->targetMode == TTP_TARGET_TEXT) ? "Text" :
                           (step->targetMode == TTP_TARGET_IMAGE) ? "Image" : "Coordinate";
-    snprintf(msgText, sizeof(msgText),
+    wsprintfA(msgText,
              "Step %lu (%s) timed out searching for target.\nRecorded pos: (%ld, %ld). Choose action:",
              (unsigned long)step->stepId, modeStr, step->origX, step->origY);
 
@@ -506,19 +510,26 @@ void ttp_engine_set_screen_dc_override(HDC hdcOverride) {
 }
 
 void ttp_diag_log(const char* fmt, ...) {
-    FILE* fp = fopen("E:\\reverse-gemini\\Library\\logs\\tinytask_debug.log", "a");
-    if (!fp) fp = fopen("Library\\logs\\tinytask_debug.log", "a");
-    if (!fp) fp = fopen("tinytask_debug.log", "a");
-    if (!fp) return;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fprintf(fp, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    char msgBuf[512];
     va_list args;
     va_start(args, fmt);
-    vfprintf(fp, fmt, args);
+    wvsprintfA(msgBuf, fmt, args);
     va_end(args);
-    fprintf(fp, "\n");
-    fclose(fp);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char fullLog[600];
+    wsprintfA(fullLog, "[%02d:%02d:%02d.%03d] %s\r\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msgBuf);
+
+    OutputDebugStringA(fullLog);
+
+    HANDLE hFile = CreateFileA("tinytask_debug.log", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        DWORD len = (DWORD)lstrlenA(fullLog);
+        WriteFile(hFile, fullLog, len, &written, NULL);
+        CloseHandle(hFile);
+    }
 }
 
 static int handle_timeout_choice(const TTPStep* step, HWND hParent) {
@@ -532,6 +543,25 @@ static int handle_timeout_choice(const TTPStep* step, HWND hParent) {
     if (presetAction == TTP_TIMEOUT_ACT_STOP) return TTP_TIMEOUT_STOP;
 
     return ttp_show_timeout_dialog(hParent, step);
+}
+
+static const char* ttp_strstr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    int nlen = lstrlenA(needle);
+    if (nlen == 0) return haystack;
+    int hlen = lstrlenA(haystack);
+    if (hlen < nlen) return NULL;
+    for (int i = 0; i <= hlen - nlen; i++) {
+        BOOL match = TRUE;
+        for (int j = 0; j < nlen; j++) {
+            if (haystack[i + j] != needle[j]) {
+                match = FALSE;
+                break;
+            }
+        }
+        if (match) return &haystack[i];
+    }
+    return NULL;
 }
 
 BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, HWND hParentForModal) {
@@ -562,7 +592,7 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 BOOL accHit = ttp_get_accessible_name_at_point(origPt, accName, sizeof(accName));
                 ttp_diag_log("  [TEXT] OrigPt (%ld, %ld) Accessible: \"%s\" (hit=%d)",
                     origPt.x, origPt.y, accName, accHit);
-                if (accHit && strstr(accName, step->textKey)) {
+                if (accHit && ttp_strstr(accName, step->textKey)) {
                     BOOL verified = TRUE;
                     if (bmpData && bmpSize > 0) {
                         HDC hdcScr = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
@@ -834,7 +864,7 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         if (targetX != 0 || targetY != 0) {
             SetCursorPos(targetX, targetY);
         }
-        int len = (int)strlen(step->textKey);
+        int len = lstrlenA(step->textKey);
         for (int i = 0; i < len; i++) {
             char ch = step->textKey[i];
             SHORT vk = VkKeyScanA(ch);
