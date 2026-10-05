@@ -869,25 +869,32 @@ static int select_probe_points(const BYTE* tGray, const BYTE* tMask, int tw, int
 
             int bestX = -1, bestY = -1;
             int bestScore = -1;
+            int wantHigh = ((gy + gx) % 2 == 0);
 
-            for (int y = y0; y < y1; y++) {
-                for (int x = x0; x < x1; x++) {
-                    int idx = y * tw + x;
-                    if (!tMask[idx]) continue;
+            for (int pass = 0; pass < 2 && bestX < 0; pass++) {
+                for (int y = y0; y < y1; y++) {
+                    for (int x = x0; x < x1; x++) {
+                        int idx = y * tw + x;
+                        if (!tMask[idx]) continue;
+                        if (pass == 0) {
+                            if (wantHigh && (int)tGray[idx] < (int)(muT + 0.5)) continue;
+                            if (!wantHigh && (int)tGray[idx] >= (int)(muT + 0.5)) continue;
+                        }
 
-                    int grad = 0;
-                    if (x > 0 && tMask[idx - 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - 1]);
-                    if (x < tw - 1 && tMask[idx + 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + 1]);
-                    if (y > 0 && tMask[idx - tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - tw]);
-                    if (y < th - 1 && tMask[idx + tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + tw]);
+                        int grad = 0;
+                        if (x > 0 && tMask[idx - 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - 1]);
+                        if (x < tw - 1 && tMask[idx + 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + 1]);
+                        if (y > 0 && tMask[idx - tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - tw]);
+                        if (y < th - 1 && tMask[idx + tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + tw]);
 
-                    int contrast = __builtin_abs((int)tGray[idx] - (int)(muT + 0.5));
-                    int score = grad * 2 + contrast;
+                        int contrast = __builtin_abs((int)tGray[idx] - (int)(muT + 0.5));
+                        int score = grad * 2 + contrast;
 
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestX = x;
-                        bestY = y;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestX = x;
+                            bestY = y;
+                        }
                     }
                 }
             }
