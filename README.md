@@ -181,10 +181,10 @@ TinyTask Pro 摒弃了将宏脚本与图片零散存放在文件夹中的脆弱�
 * 兼容性：100% 自动识别加载 v1 格式（172 字节 Step，`chromaTol` 缺省置 0），并向下完全兼容经典 TinyTask `.rec` 坐标文件。
 
 ### 配套 Python 工具与一键拖拽脚本
-项目在 `src/` 与 `bin/` 中提供了开箱即用的工程逆向检查与解包工具：
+项目在 `src/pro/` 与 `bin/` 中提供了开箱即用的工程逆向检查与解包工具：
 * **命令行解包**：
   ```bash
-  python reverse-gemini/src/tinytask_tool.py unpack "path/to/macro.ttp"
+  python reverse-gemini/src/pro/tinytask_tool.py unpack "path/to/macro.ttp"
   ```
   自动在同目录下生成 `_unpacked/` 文件夹，提取全部步骤的 `.bmp` 图片与 `manifest.json` 结构清单。
 * **Windows 免敲命令一键解包**：
@@ -220,69 +220,69 @@ TinyTask Pro 摒弃了将宏脚本与图片零散存放在文件夹中的脆弱�
 
 #### 1. 32 位极致轻量版 (x86 - 69.0 KB)：
 ```bash
-windres -F pe-i386 reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res32.o
+windres -F pe-i386 reverse-gemini/src/pro/tinytask_pro.rc -O coff -o reverse-gemini/src/pro/tinytask_pro_res32.o
 
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe -fno-stack-protector -fno-exceptions \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section,-e,_WinMainCRTStartup" \
-    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
-    reverse-gemini/src/tinytask_pro_res32.o \
+    reverse-gemini/src/pro/tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c \
+    reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c \
+    reverse-gemini/src/pro/tinytask_pro_res32.o \
     -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
     -lole32 -loleaut32 -loleacc -luuid -lgcc \
     -o reverse-gemini/bin/tinytask_pro_x86.exe
 
-rm reverse-gemini/src/tinytask_pro_res32.o
+rm reverse-gemini/src/pro/tinytask_pro_res32.o
 ```
 输出文件：[`reverse-gemini/bin/tinytask_pro_x86.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro_x86.exe)（**70,656 字节 / 69.0 KB，0 CRT 依赖**）。
 
 #### 2. 64 位原生版 (x64 - 75.5 KB)：
 ```bash
-windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
+windres reverse-gemini/src/pro/tinytask_pro.rc -O coff -o reverse-gemini/src/pro/tinytask_pro_res.o
 
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section" \
-    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
-    reverse-gemini/src/tinytask_pro_res.o \
+    reverse-gemini/src/pro/tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c \
+    reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c \
+    reverse-gemini/src/pro/tinytask_pro_res.o \
     -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
     -lole32 -loleaut32 -loleacc \
     -o reverse-gemini/bin/tinytask_pro.exe
 
-rm reverse-gemini/src/tinytask_pro_res.o
+rm reverse-gemini/src/pro/tinytask_pro_res.o
 ```
 输出文件：[`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe)（**77,312 字节 / 75.5 KB，0 CRT 依赖**）。
 
 ### 运行全套 8 大单元与回归测试套件 (47+ 项全绿)：
 ```bash
 # 1. 存储层序列化往返与 32bpp BGRA 向下兼容测试 (7 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_storage.c reverse-gemini/src/ttp_storage.c -o test_storage.exe && ./test_storage.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_storage.c reverse-gemini/src/pro/ttp_storage.c -o test_storage.exe && ./test_storage.exe
 
 # 2. 纯整型 64 位 isqrt 与牛顿开方精度测试 (2 组)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_isqrt.c reverse-gemini/src/ttp_vision.c -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -o test_isqrt.exe && ./test_isqrt.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_isqrt.c reverse-gemini/src/pro/ttp_vision.c -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -o test_isqrt.exe && ./test_isqrt.exe
 
 # 3. 自动边缘色差 BFS 泛洪抠图与防误抠安全回退测试 (4 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_chromakey.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_chromakey.exe && ./test_chromakey.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_chromakey.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_chromakey.exe && ./test_chromakey.exe
 
 # 4. 2560x1440 极端壁纸色调变幻与掩码探测 SAD + Masked NCC 搜图测试 (5 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_masked_vision.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_masked_vision.exe && ./test_masked_vision.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_masked_vision.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_masked_vision.exe && ./test_masked_vision.exe
 
 # 5. 纯 C 视觉与 UIED 隔离测试 (5 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_vision.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_vision.exe && ./test_vision.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_vision.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_vision.exe && ./test_vision.exe
 
 # 6. 语义动作合成与回放引擎测试 (9 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_engine.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_engine.exe && ./test_engine.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_engine.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_engine.exe && ./test_engine.exe
 
 # 7. 6 列抽屉、微调模态框与 60FPS 棋盘格集成测试 (7 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
 
-# 8. 级联检索、双引擎与极端场景全量回归基准测试 (13 项)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
+# 8. 级联检索、双引擎与极端场景全量回归基准测试 (14 项)
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
 ```
 
 ---
@@ -410,7 +410,7 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 * **`.ttp v2` Binary Packaging**: Encapsulates metadata header `TTPHeader` (version 2), step descriptors with `chromaTol`, and 32-bit BGRA DIB/BMP visual assets with Alpha transparency channel. Fully backward-compatible with v1 and `.rec` files.
 * **Python Tooling (`tinytask_tool.py`)**:
   ```bash
-  python reverse-gemini/src/tinytask_tool.py unpack "path/to/macro.ttp"
+  python reverse-gemini/src/pro/tinytask_tool.py unpack "path/to/macro.ttp"
   ```
   Extracts all step images and outputs `manifest.json`.
 * **Drag-and-Drop Batch Script (`unpack_ttp.bat`)**:
@@ -422,7 +422,7 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 
 | Feature | TinyTask 1.77 | TinyTask Pro | Heavyweight RPA (Power Automate, UiPath) |
 |---|---|---|---|
-| **Binary Footprint** | ~35 KB | **~92 KB (Standalone)** | 500 MB ~ 2 GB Runtime |
+| **Binary Footprint** | ~35 KB | **~69 KB (x86) / ~75 KB (x64)** | 500 MB ~ 2 GB Runtime |
 | **External Dependencies**| None (Win32) | **None (Native Win32, 0 `<math.h>`/`-lm`)** | .NET / Python / Node / Chromium |
 | **Element Locating** | Fixed Physical $(X,Y)$ | **Masked Cascaded Vision + Accessibility** | Selectors / DOM / Cloud OCR |
 | **Wallpaper Immunity** | None | **Immune (Masked NCC score 1.0000 on hue shifts)** | Weak (Color drift breaks matches) |
@@ -442,69 +442,69 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 
 #### 1. Ultra-Compact 32-bit (x86 - 69.0 KB):
 ```bash
-windres -F pe-i386 reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res32.o
+windres -F pe-i386 reverse-gemini/src/pro/tinytask_pro.rc -O coff -o reverse-gemini/src/pro/tinytask_pro_res32.o
 
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe -fno-stack-protector -fno-exceptions \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section,-e,_WinMainCRTStartup" \
-    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
-    reverse-gemini/src/tinytask_pro_res32.o \
+    reverse-gemini/src/pro/tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c \
+    reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c \
+    reverse-gemini/src/pro/tinytask_pro_res32.o \
     -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
     -lole32 -loleaut32 -loleacc -luuid -lgcc \
     -o reverse-gemini/bin/tinytask_pro_x86.exe
 
-rm reverse-gemini/src/tinytask_pro_res32.o
+rm reverse-gemini/src/pro/tinytask_pro_res32.o
 ```
 Resulting binary: [`reverse-gemini/bin/tinytask_pro_x86.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro_x86.exe) (**69.0 KB, 70,656 bytes**, with **0 CRT DLL dependencies**).
 
 #### 2. Native 64-bit (x64 - 75.5 KB):
 ```bash
-windres reverse-gemini/src/tinytask_pro.rc -O coff -o reverse-gemini/src/tinytask_pro_res.o
+windres reverse-gemini/src/pro/tinytask_pro.rc -O coff -o reverse-gemini/src/pro/tinytask_pro_res.o
 
 gcc -Os -flto -s -mwindows -nostdlib -mno-stack-arg-probe \
     -fomit-frame-pointer -fno-ident -fmerge-all-constants \
     -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     "-Wl,--gc-sections,--disable-reloc-section" \
-    reverse-gemini/src/tinytask_pro.c reverse-gemini/src/ttp_storage.c \
-    reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c \
-    reverse-gemini/src/tinytask_pro_res.o \
+    reverse-gemini/src/pro/tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c \
+    reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c \
+    reverse-gemini/src/pro/tinytask_pro_res.o \
     -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
     -lole32 -loleaut32 -loleacc \
     -o reverse-gemini/bin/tinytask_pro.exe
 
-rm reverse-gemini/src/tinytask_pro_res.o
+rm reverse-gemini/src/pro/tinytask_pro_res.o
 ```
 Resulting binary: [`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe) (**75.5 KB, 77,312 bytes**, with **0 CRT DLL dependencies**).
 
 ### Run Test Suites (47+ Tests Passing):
 ```bash
 # 1. Storage roundtrip & 32bpp backward compatibility (7 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_storage.c reverse-gemini/src/ttp_storage.c -o test_storage.exe && ./test_storage.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_storage.c reverse-gemini/src/pro/ttp_storage.c -o test_storage.exe && ./test_storage.exe
 
 # 2. Integer isqrt & Newton-Raphson precision suites (2 suites)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_isqrt.c reverse-gemini/src/ttp_vision.c -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -o test_isqrt.exe && ./test_isqrt.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_isqrt.c reverse-gemini/src/pro/ttp_vision.c -loleacc -lole32 -loleaut32 -lgdi32 -luser32 -o test_isqrt.exe && ./test_isqrt.exe
 
 # 3. Chromakey BFS flood-fill & safety fallback (4 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_chromakey.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_chromakey.exe && ./test_chromakey.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_chromakey.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_chromakey.exe && ./test_chromakey.exe
 
 # 4. 2560x1440 wallpaper interference & Masked Probe SAD + NCC (5 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_masked_vision.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_masked_vision.exe && ./test_masked_vision.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_masked_vision.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_masked_vision.exe && ./test_masked_vision.exe
 
 # 5. Pure-C vision & UIED button boundary isolation (5 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_vision.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_vision.exe && ./test_vision.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_vision.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_vision.exe && ./test_vision.exe
 
 # 6. Semantic action synthesizer & playback engine (9 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_engine.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_engine.exe && ./test_engine.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_engine.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_engine.exe && ./test_engine.exe
 
 # 7. 6-column drawer, modal step editor & 60FPS checkerboard (7 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
 
-# 8. Cascaded visual recovery & boundary regression scenarios (13 tests)
-gcc -Os -Ireverse-gemini/src reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/ttp_storage.c reverse-gemini/src/ttp_vision.c reverse-gemini/src/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
+# 8. Cascaded visual recovery & boundary regression scenarios (14 tests)
+gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
 ```
 
 ---

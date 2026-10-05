@@ -51,6 +51,15 @@ static int mock_timeout_cb(const TTPStep* step, void* userData) {
 static FILE* fopen_dual(const char* p1, const char* p2) {
     FILE* f = fopen(p1, "rb");
     if (!f && p2) f = fopen(p2, "rb");
+    if (!f && p1 && strncmp(p1, "src/", 4) == 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "src/pro/%s", p1 + 4);
+        f = fopen(buf, "rb");
+        if (!f) {
+            snprintf(buf, sizeof(buf), "reverse-gemini/src/pro/%s", p1 + 4);
+            f = fopen(buf, "rb");
+        }
+    }
     return f;
 }
 

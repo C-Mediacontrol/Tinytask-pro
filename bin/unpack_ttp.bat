@@ -5,6 +5,6 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-python "%~dp0..\src\tinytask_tool.py" unpack "%~1"
+python "%~dp0..\src\pro\tinytask_tool.py" unpack "%~1"
 pause
 
