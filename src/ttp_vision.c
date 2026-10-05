@@ -1,8 +1,9 @@
-#include "ttp_vision.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <oleacc.h>
+#include "ttp_vision.h"
 
 /* Fast 64-bit integer square root without floating point or CRT math.h */
 unsigned long ttp_isqrt(unsigned long long n) {
@@ -74,7 +75,7 @@ int ttp_pick_nearest_candidate(LONG origX, LONG origY, const POINT* candidates, 
 
 void ttp_free_bmp_buffer(BYTE* bmpBuffer) {
     if (bmpBuffer) {
-        free(bmpBuffer);
+        HeapFree(GetProcessHeap(), 0, bmpBuffer);
     }
 }
 
@@ -95,7 +96,7 @@ BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, 
 
     int totalPixels = w * h;
     /* Initialize mask to all 1s (foreground) */
-    memset(outMask, 1, (size_t)totalPixels);
+    __builtin_memset(outMask, 1, (size_t)totalPixels);
 
     /* 1. Sample 4-border pixels to compute base background color */
     int borderCount = 0;
@@ -145,7 +146,7 @@ BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, 
     }
 
     /* 3. BFS 4-neighbor flood fill starting from border pixels matching base color within tol */
-    int* queue = (int*)malloc((size_t)totalPixels * sizeof(int));
+    int* queue = (int*)HeapAlloc(GetProcessHeap(), 0, (size_t)totalPixels * sizeof(int));
     if (!queue) {
         return FALSE;
     }
@@ -199,7 +200,9 @@ BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, 
         }
     }
 
-    free(queue);
+    if (queue) {
+        HeapFree(GetProcessHeap(), 0, queue);
+    }
 
     /* 4. Safety fallback: if foreground ratio < 15%, revert mask to all 1s */
     int fgCount = 0;
@@ -211,7 +214,7 @@ BOOL ttp_chromakey_mask(const BYTE* rgbPixels, int w, int h, int bytesPerPixel, 
 
     double fgRatio = (double)fgCount / (double)totalPixels;
     if (fgRatio < 0.15) {
-        memset(outMask, 1, (size_t)totalPixels);
+        __builtin_memset(outMask, 1, (size_t)totalPixels);
     }
 
     return TRUE;
@@ -247,7 +250,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     }
 
     BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
+    __builtin_memset(&bi, 0, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = ROI_SIZE;
     bi.bmiHeader.biHeight = -ROI_SIZE; /* top-down */
@@ -314,7 +317,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     int cx = HALF_ROI;
     int cy = HALF_ROI;
 
-    int* gradM = (int*)calloc(ROI_SIZE * ROI_SIZE, sizeof(int));
+    int* gradM = (int*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)(ROI_SIZE * ROI_SIZE) * sizeof(int));
     if (!gradM) {
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
@@ -333,7 +336,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
                      - gray[y+1][x-1] + gray[y+1][x+1];
             int gy = -gray[y-1][x-1] - 2 * gray[y-1][x] - gray[y-1][x+1]
                      + gray[y+1][x-1] + 2 * gray[y+1][x] + gray[y+1][x+1];
-            int m = abs(gx) + abs(gy);
+            int m = __builtin_abs(gx) + __builtin_abs(gy);
             gradM[y * ROI_SIZE + x] = m;
             if (x >= cx - 35 && x <= cx + 35 && y >= cy - 20 && y <= cy + 20) {
                 localGradSum += m;
@@ -351,7 +354,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     }
 
     BYTE edge[256][256];
-    memset(edge, 0, sizeof(edge));
+    __builtin_memset(edge, 0, sizeof(edge));
     for (int y = 1; y < ROI_SIZE - 1; y++) {
         for (int x = 1; x < ROI_SIZE - 1; x++) {
             if (gradM[y * ROI_SIZE + x] >= edgeThresh) {
@@ -364,7 +367,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
      * Dilation (3x3 max filter) followed by Erosion (3x3 min filter).
      * Connects discrete character strokes and fragmented button borders. */
     BYTE dilated[256][256];
-    memset(dilated, 0, sizeof(dilated));
+    __builtin_memset(dilated, 0, sizeof(dilated));
     for (int y = 1; y < ROI_SIZE - 1; y++) {
         for (int x = 1; x < ROI_SIZE - 1; x++) {
             BYTE v = 0;
@@ -379,7 +382,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     }
 
     BYTE closed[256][256];
-    memset(closed, 0, sizeof(closed));
+    __builtin_memset(closed, 0, sizeof(closed));
     for (int y = 2; y < ROI_SIZE - 2; y++) {
         for (int x = 2; x < ROI_SIZE - 2; x++) {
             BYTE v = 1;
@@ -530,7 +533,9 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     if (outerRight != -1) bestRight = outerRight;
     else if (firstRight != -1) bestRight = firstRight;
 
-    free(gradM);
+    if (gradM) {
+        HeapFree(GetProcessHeap(), 0, gradM);
+    }
 
     int L = (bestLeft < bestRight) ? bestLeft : bestRight;
     int R = (bestLeft < bestRight) ? bestRight : bestLeft;
@@ -594,7 +599,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     DWORD imgSize = (DWORD)rowStride * cropH;
     DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
 
-    BYTE* bmpBuf = (BYTE*)malloc(totalBmpSize);
+    BYTE* bmpBuf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, totalBmpSize);
     if (!bmpBuf) {
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
@@ -602,7 +607,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         if (releaseDC) ReleaseDC(NULL, hdc);
         return FALSE;
     }
-    memset(bmpBuf, 0, totalBmpSize);
+    __builtin_memset(bmpBuf, 0, totalBmpSize);
 
     BITMAPFILEHEADER* bmfh = (BITMAPFILEHEADER*)bmpBuf;
     bmfh->bfType = 0x4D42; /* 'BM' */
@@ -633,14 +638,16 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         }
     }
 
-    BYTE* mask = (BYTE*)malloc((size_t)cropW * cropH);
+    BYTE* mask = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (size_t)cropW * cropH);
     if (mask) {
         if (ttp_chromakey_mask(dstData, cropW, cropH, 4, 25, mask)) {
             for (int i = 0; i < cropW * cropH; i++) {
                 dstData[i * 4 + 3] = mask[i] ? 255 : 0;
             }
         }
-        free(mask);
+        if (mask) {
+            HeapFree(GetProcessHeap(), 0, mask);
+        }
     }
 
     *outBmp = bmpBuf;
@@ -691,7 +698,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
     }
 
     BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
+    __builtin_memset(&bi, 0, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = cropW;
     bi.bmiHeader.biHeight = -cropH; /* top-down */
@@ -715,7 +722,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
     DWORD imgSize = (DWORD)rowStride * cropH;
     DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
 
-    BYTE* bmpBuf = (BYTE*)malloc(totalBmpSize);
+    BYTE* bmpBuf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, totalBmpSize);
     if (!bmpBuf) {
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
@@ -723,7 +730,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
         if (releaseDC) ReleaseDC(NULL, hdc);
         return FALSE;
     }
-    memset(bmpBuf, 0, totalBmpSize);
+    __builtin_memset(bmpBuf, 0, totalBmpSize);
 
     BITMAPFILEHEADER* bmfh = (BITMAPFILEHEADER*)bmpBuf;
     bmfh->bfType = 0x4D42; /* 'BM' */
@@ -806,7 +813,7 @@ static BOOL capture_hdc_to_gray(HDC hdcSrc, int srcX, int srcY, int w, int h, BY
     if (!hdcMem) return FALSE;
 
     BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
+    __builtin_memset(&bi, 0, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = w;
     bi.bmiHeader.biHeight = -h; /* top-down */
@@ -869,12 +876,12 @@ static int select_probe_points(const BYTE* tGray, const BYTE* tMask, int tw, int
                     if (!tMask[idx]) continue;
 
                     int grad = 0;
-                    if (x > 0 && tMask[idx - 1]) grad += abs((int)tGray[idx] - (int)tGray[idx - 1]);
-                    if (x < tw - 1 && tMask[idx + 1]) grad += abs((int)tGray[idx] - (int)tGray[idx + 1]);
-                    if (y > 0 && tMask[idx - tw]) grad += abs((int)tGray[idx] - (int)tGray[idx - tw]);
-                    if (y < th - 1 && tMask[idx + tw]) grad += abs((int)tGray[idx] - (int)tGray[idx + tw]);
+                    if (x > 0 && tMask[idx - 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - 1]);
+                    if (x < tw - 1 && tMask[idx + 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + 1]);
+                    if (y > 0 && tMask[idx - tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - tw]);
+                    if (y < th - 1 && tMask[idx + tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + tw]);
 
-                    int contrast = abs((int)tGray[idx] - (int)(muT + 0.5));
+                    int contrast = __builtin_abs((int)tGray[idx] - (int)(muT + 0.5));
                     int score = grad * 2 + contrast;
 
                     if (score > bestScore) {
@@ -907,7 +914,7 @@ static int select_probe_points(const BYTE* tGray, const BYTE* tMask, int tw, int
 
                     BOOL tooClose = FALSE;
                     for (int p = 0; p < probeCount; p++) {
-                        if (abs(outProbes[p].dx - x) <= 1 && abs(outProbes[p].dy - y) <= 1) {
+                        if (__builtin_abs(outProbes[p].dx - x) <= 1 && __builtin_abs(outProbes[p].dy - y) <= 1) {
                             tooClose = TRUE;
                             break;
                         }
@@ -915,11 +922,11 @@ static int select_probe_points(const BYTE* tGray, const BYTE* tMask, int tw, int
                     if (tooClose) continue;
 
                     int grad = 0;
-                    if (x > 0 && tMask[idx - 1]) grad += abs((int)tGray[idx] - (int)tGray[idx - 1]);
-                    if (x < tw - 1 && tMask[idx + 1]) grad += abs((int)tGray[idx] - (int)tGray[idx + 1]);
-                    if (y > 0 && tMask[idx - tw]) grad += abs((int)tGray[idx] - (int)tGray[idx - tw]);
-                    if (y < th - 1 && tMask[idx + tw]) grad += abs((int)tGray[idx] - (int)tGray[idx + tw]);
-                    int contrast = abs((int)tGray[idx] - (int)(muT + 0.5));
+                    if (x > 0 && tMask[idx - 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - 1]);
+                    if (x < tw - 1 && tMask[idx + 1]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + 1]);
+                    if (y > 0 && tMask[idx - tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx - tw]);
+                    if (y < th - 1 && tMask[idx + tw]) grad += __builtin_abs((int)tGray[idx] - (int)tGray[idx + tw]);
+                    int contrast = __builtin_abs((int)tGray[idx] - (int)(muT + 0.5));
                     int score = grad * 2 + contrast;
 
                     if (score > highestScore) {
@@ -962,7 +969,7 @@ static BOOL match_gray_buffer_masked_ncc(
 
     const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
     int tw = bmih->biWidth;
-    int th = abs(bmih->biHeight);
+    int th = __builtin_abs(bmih->biHeight);
     BOOL isBottomUp = (bmih->biHeight > 0);
     int bpp = bmih->biBitCount;
 
@@ -983,14 +990,14 @@ static BOOL match_gray_buffer_masked_ncc(
     BOOL dynTemplate = FALSE;
 
     if (N > TTP_TEMPLATE_PIXELS_MAX) {
-        tGray = (BYTE*)malloc(N);
-        tMask = (BYTE*)malloc(N);
-        mPixels = (TTPMaskedPixel*)malloc(N * sizeof(TTPMaskedPixel));
+        tGray = (BYTE*)HeapAlloc(GetProcessHeap(), 0, N);
+        tMask = (BYTE*)HeapAlloc(GetProcessHeap(), 0, N);
+        mPixels = (TTPMaskedPixel*)HeapAlloc(GetProcessHeap(), 0, N * sizeof(TTPMaskedPixel));
         dynTemplate = TRUE;
         if (!tGray || !tMask || !mPixels) {
-            if (tGray) free(tGray);
-            if (tMask) free(tMask);
-            if (mPixels) free(mPixels);
+            if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
+            if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
+            if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
             if (outBestScore) *outBestScore = 0.0;
             return FALSE;
         }
@@ -999,7 +1006,11 @@ static BOOL match_gray_buffer_masked_ncc(
     int tStride = (bpp == 32) ? (tw * 4) : (((tw * 3 + 3) / 4) * 4);
     const BYTE* tPixels = bmpPattern + bmfh->bfOffBits;
     if (bmfh->bfOffBits >= bmpSize) {
-        if (dynTemplate) { free(tGray); free(tMask); free(mPixels); }
+        if (dynTemplate) {
+            if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
+            if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
+            if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
+        }
         if (outBestScore) *outBestScore = 0.0;
         return FALSE;
     }
@@ -1039,7 +1050,7 @@ static BOOL match_gray_buffer_masked_ncc(
 
     /* Fall back to standard unmasked template if foreground is too small or covers whole pattern */
     if (Nm < 16 || Nm == N) {
-        memset(tMask, 1, N);
+        __builtin_memset(tMask, 1, N);
         Nm = N;
         sumT = 0.0;
         for (int i = 0; i < N; i++) {
@@ -1066,7 +1077,11 @@ static BOOL match_gray_buffer_masked_ncc(
     }
 
     if (sigmaT2 < 1e-6) {
-        if (dynTemplate) { free(tGray); free(tMask); free(mPixels); }
+        if (dynTemplate) {
+            if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
+            if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
+            if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
+        }
         if (outBestScore) *outBestScore = 0.0;
         return FALSE;
     }
@@ -1108,7 +1123,7 @@ static BOOL match_gray_buffer_masked_ncc(
             BOOL passedProbe = TRUE;
             for (int k = 0; k < numProbes; k++) {
                 int scrVal = grayBuf[(y + probes[k].dy) * imgW + (x + probes[k].dx)];
-                sadSum += abs(scrVal - (int)probes[k].val);
+                sadSum += __builtin_abs(scrVal - (int)probes[k].val);
                 if (sadSum > maxAllowedSad) {
                     passedProbe = FALSE;
                     break;
@@ -1149,7 +1164,7 @@ static BOOL match_gray_buffer_masked_ncc(
                 int distThresh = (tw > th) ? (th / 2) : (tw / 2);
                 if (distThresh < 4) distThresh = 4;
                 for (int c = 0; c < topCandCount; c++) {
-                    if (abs(topCands[c].x - x) <= distThresh && abs(topCands[c].y - y) <= distThresh) {
+                    if (__builtin_abs(topCands[c].x - x) <= distThresh && __builtin_abs(topCands[c].y - y) <= distThresh) {
                         existing = c;
                         break;
                     }
@@ -1231,9 +1246,9 @@ static BOOL match_gray_buffer_masked_ncc(
     }
 
     if (dynTemplate) {
-        free(tGray);
-        free(tMask);
-        free(mPixels);
+        if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
+        if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
+        if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
     }
 
     if (outBestX) *outBestX = bestX;
@@ -1251,7 +1266,7 @@ BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, cons
 
     const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
     int tw = bmih->biWidth;
-    int th = abs(bmih->biHeight);
+    int th = __builtin_abs(bmih->biHeight);
     if (tw <= 0 || th <= 0) {
         if (outScore) *outScore = 0.0;
         return FALSE;
@@ -1300,7 +1315,7 @@ BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, cons
     TTPVisionBuffers* vb = get_vision_buffers(); BYTE* scrGray = vb ? vb->screenGray : NULL;
     BOOL dynScreen = FALSE;
     if ((size_t)screenW * (size_t)screenH > TTP_SCREEN_GRAY_MAX) {
-        scrGray = (BYTE*)malloc((size_t)screenW * (size_t)screenH);
+        scrGray = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (size_t)screenW * (size_t)screenH);
         dynScreen = TRUE;
         if (!scrGray) {
             if (releaseDC) ReleaseDC(NULL, hdc);
@@ -1310,7 +1325,9 @@ BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, cons
     }
 
     if (!capture_hdc_to_gray(hdc, 0, 0, screenW, screenH, scrGray)) {
-        if (dynScreen) free(scrGray);
+        if (dynScreen && scrGray) {
+            HeapFree(GetProcessHeap(), 0, scrGray);
+        }
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
         return FALSE;
@@ -1324,7 +1341,9 @@ BOOL ttp_match_template_masked_ncc(HDC hdcScreen, int screenW, int screenH, cons
     double bestScore = 0.0;
     BOOL matched = match_gray_buffer_masked_ncc(scrGray, screenW, screenH, bmpPattern, bmpSize, minScore, &bestX, &bestY, &bestScore);
 
-    if (dynScreen) free(scrGray);
+    if (dynScreen && scrGray) {
+        HeapFree(GetProcessHeap(), 0, scrGray);
+    }
 
     if (outScore) *outScore = bestScore;
     if (outMatchPos && bestScore > 0.0) {
@@ -1344,7 +1363,7 @@ BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int ro
 
     const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpPattern + sizeof(BITMAPFILEHEADER));
     int tw = bmih->biWidth;
-    int th = abs(bmih->biHeight);
+    int th = __builtin_abs(bmih->biHeight);
     if (tw <= 0 || th <= 0) {
         if (outScore) *outScore = 0.0;
         return FALSE;
@@ -1387,7 +1406,7 @@ BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int ro
     TTPVisionBuffers* vb = get_vision_buffers(); BYTE* scrGray = vb ? vb->screenGray : NULL;
     BOOL dynScreen = FALSE;
     if ((size_t)roiW * (size_t)roiH > TTP_SCREEN_GRAY_MAX) {
-        scrGray = (BYTE*)malloc((size_t)roiW * (size_t)roiH);
+        scrGray = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (size_t)roiW * (size_t)roiH);
         dynScreen = TRUE;
         if (!scrGray) {
             if (releaseDC) ReleaseDC(NULL, hdc);
@@ -1397,7 +1416,9 @@ BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int ro
     }
 
     if (!capture_hdc_to_gray(hdc, x0, y0, roiW, roiH, scrGray)) {
-        if (dynScreen) free(scrGray);
+        if (dynScreen && scrGray) {
+            HeapFree(GetProcessHeap(), 0, scrGray);
+        }
         if (releaseDC) ReleaseDC(NULL, hdc);
         if (outScore) *outScore = 0.0;
         return FALSE;
@@ -1408,7 +1429,9 @@ BOOL ttp_match_template_masked_ncc_roi(HDC hdcScreen, int roiX, int roiY, int ro
     double bestScore = 0.0;
     BOOL matched = match_gray_buffer_masked_ncc(scrGray, roiW, roiH, bmpPattern, bmpSize, minScore, &bestX, &bestY, &bestScore);
 
-    if (dynScreen) free(scrGray);
+    if (dynScreen && scrGray) {
+        HeapFree(GetProcessHeap(), 0, scrGray);
+    }
 
     if (outScore) *outScore = bestScore;
     if (outMatchPos && bestScore > 0.0) {
@@ -1429,7 +1452,7 @@ BOOL ttp_match_template_ncc_roi(HDC hdcScreen, int roiX, int roiY, int roiRadius
 
 BOOL ttp_get_accessible_element_at_point(POINT pt, char* outName, int maxLen, RECT* outRect) {
     if (outName && maxLen > 0) outName[0] = '\0';
-    if (outRect) memset(outRect, 0, sizeof(RECT));
+    if (outRect) __builtin_memset(outRect, 0, sizeof(RECT));
 
     CoInitialize(NULL);
     IAccessible* pAcc = NULL;
@@ -1484,11 +1507,22 @@ typedef struct {
 
 static BOOL text_matches(const char* haystack, const char* needle) {
     if (!haystack || !needle) return FALSE;
-    int nlen = (int)strlen(needle);
-    int hlen = (int)strlen(haystack);
+    int nlen = lstrlenA(needle);
+    int hlen = lstrlenA(haystack);
     if (nlen == 0 || hlen < nlen) return FALSE;
     for (int i = 0; i <= hlen - nlen; i++) {
-        if (_strnicmp(&haystack[i], needle, nlen) == 0) {
+        BOOL match = TRUE;
+        for (int j = 0; j < nlen; j++) {
+            char c1 = haystack[i + j];
+            char c2 = needle[j];
+            if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 + ('a' - 'A'));
+            if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 + ('a' - 'A'));
+            if (c1 != c2) {
+                match = FALSE;
+                break;
+            }
+        }
+        if (match) {
             return TRUE;
         }
     }
@@ -1574,7 +1608,7 @@ static void check_desktop_icons_accessible(const char* targetText, TextSearchCon
     if (SUCCEEDED(AccessibleObjectFromWindow(hLV, OBJID_CLIENT, &IID_IAccessible, (void**)&pAcc)) && pAcc) {
         long childCount = 0;
         if (SUCCEEDED(pAcc->lpVtbl->get_accChildCount(pAcc, &childCount)) && childCount > 0) {
-            VARIANT* pChildren = (VARIANT*)malloc(sizeof(VARIANT) * childCount);
+            VARIANT* pChildren = (VARIANT*)HeapAlloc(GetProcessHeap(), 0, sizeof(VARIANT) * childCount);
             if (pChildren) {
                 long obtained = 0;
                 if (SUCCEEDED(AccessibleChildren(pAcc, 0, childCount, pChildren, &obtained))) {
@@ -1605,7 +1639,9 @@ static void check_desktop_icons_accessible(const char* targetText, TextSearchCon
                         VariantClear(&pChildren[i]);
                     }
                 }
-                free(pChildren);
+                if (pChildren) {
+                    HeapFree(GetProcessHeap(), 0, pChildren);
+                }
             }
         }
         pAcc->lpVtbl->Release(pAcc);
