@@ -3,9 +3,26 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+static const char* ttp_strstr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return haystack;
+    for (; *haystack; haystack++) {
+        const char* h = haystack;
+        const char* n = needle;
+        while (*h && *n && (*h == *n)) { h++; n++; }
+        if (!*n) return haystack;
+    }
+    return NULL;
+}
+static int ttp_memcmp8(const void* a, const void* b) {
+    const BYTE* p1 = (const BYTE*)a;
+    const BYTE* p2 = (const BYTE*)b;
+    for (int i = 0; i < 8; i++) {
+        if (p1[i] != p2[i]) return p1[i] - p2[i];
+    }
+    return 0;
+}
 
 #include "ttp_core.h"
 #include "ttp_storage.h"
@@ -216,19 +233,19 @@ static void StepArray_Clear(void) {
     if (g_bmpBuffers) {
         for (DWORD i = 0; i < g_stepCount; i++) {
             if (g_bmpBuffers[i]) {
-                free(g_bmpBuffers[i]);
+                HeapFree(GetProcessHeap(), 0, g_bmpBuffers[i]);
                 g_bmpBuffers[i] = NULL;
             }
         }
-        free(g_bmpBuffers);
+        HeapFree(GetProcessHeap(), 0, g_bmpBuffers);
         g_bmpBuffers = NULL;
     }
     if (g_bmpSizes) {
-        free(g_bmpSizes);
+        HeapFree(GetProcessHeap(), 0, g_bmpSizes);
         g_bmpSizes = NULL;
     }
     if (g_steps) {
-        free(g_steps);
+        HeapFree(GetProcessHeap(), 0, g_steps);
         g_steps = NULL;
     }
     g_stepCount = 0;
@@ -240,15 +257,15 @@ static BOOL StepArray_EnsureCap(DWORD needed) {
     DWORD newCap = (g_stepCap == 0) ? 32 : g_stepCap * 2;
     if (newCap < needed) newCap = needed;
 
-    TTPStep* newSteps = (TTPStep*)realloc(g_steps, newCap * sizeof(TTPStep));
+    TTPStep* newSteps = (TTPStep*)(g_steps ? HeapReAlloc(GetProcessHeap(), 0, g_steps, newCap * sizeof(TTPStep)) : HeapAlloc(GetProcessHeap(), 0, newCap * sizeof(TTPStep)));
     if (!newSteps) return FALSE;
     g_steps = newSteps;
 
-    BYTE** newBmps = (BYTE**)realloc(g_bmpBuffers, newCap * sizeof(BYTE*));
+    BYTE** newBmps = (BYTE**)(g_bmpBuffers ? HeapReAlloc(GetProcessHeap(), 0, g_bmpBuffers, newCap * sizeof(BYTE*)) : HeapAlloc(GetProcessHeap(), 0, newCap * sizeof(BYTE*)));
     if (!newBmps) return FALSE;
     g_bmpBuffers = newBmps;
 
-    DWORD* newSizes = (DWORD*)realloc(g_bmpSizes, newCap * sizeof(DWORD));
+    DWORD* newSizes = (DWORD*)(g_bmpSizes ? HeapReAlloc(GetProcessHeap(), 0, g_bmpSizes, newCap * sizeof(DWORD)) : HeapAlloc(GetProcessHeap(), 0, newCap * sizeof(DWORD)));
     if (!newSizes) return FALSE;
     g_bmpSizes = newSizes;
 
@@ -266,9 +283,9 @@ static BOOL StepArray_Add(const TTPStep* step, const BYTE* bmpData, DWORD bmpSiz
     g_steps[g_stepCount].stepId = g_stepCount + 1;
 
     if (bmpData && bmpSize > 0) {
-        g_bmpBuffers[g_stepCount] = (BYTE*)malloc(bmpSize);
+        g_bmpBuffers[g_stepCount] = (BYTE*)HeapAlloc(GetProcessHeap(), 0, bmpSize);
         if (g_bmpBuffers[g_stepCount]) {
-            memcpy(g_bmpBuffers[g_stepCount], bmpData, bmpSize);
+            __builtin_memcpy(g_bmpBuffers[g_stepCount], bmpData, bmpSize);
             g_bmpSizes[g_stepCount] = bmpSize;
         } else {
             g_bmpSizes[g_stepCount] = 0;
@@ -291,7 +308,7 @@ static void StepArray_Renumber(void) {
 static BOOL StepArray_Delete(DWORD index) {
     if (index >= g_stepCount) return FALSE;
     if (g_bmpBuffers[index]) {
-        free(g_bmpBuffers[index]);
+        HeapFree(GetProcessHeap(), 0, g_bmpBuffers[index]);
     }
     for (DWORD i = index; i + 1 < g_stepCount; i++) {
         g_steps[i] = g_steps[i + 1];
@@ -336,10 +353,10 @@ static void ClearRecordedClicks(void) {
     if (g_recClicks) {
         for (DWORD i = 0; i < g_recClickCount; i++) {
             if (g_recClicks[i].bmpData) {
-                free(g_recClicks[i].bmpData);
+                HeapFree(GetProcessHeap(), 0, g_recClicks[i].bmpData);
             }
         }
-        free(g_recClicks);
+        HeapFree(GetProcessHeap(), 0, g_recClicks);
         g_recClicks = NULL;
     }
     g_recClickCount = 0;
@@ -349,7 +366,12 @@ static void ClearRecordedClicks(void) {
 static void AddRecordedClick(LONG x, LONG y, DWORD timestamp, BYTE* bmpData, DWORD bmpSize, const char* text) {
     if (g_recClickCount >= g_recClickCap) {
         DWORD newCap = (g_recClickCap == 0) ? 16 : g_recClickCap * 2;
-        RecordedClick* newArr = (RecordedClick*)realloc(g_recClicks, newCap * sizeof(RecordedClick));
+        RecordedClick* newArr;
+        if (!g_recClicks) {
+            newArr = (RecordedClick*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, newCap * sizeof(RecordedClick));
+        } else {
+            newArr = (RecordedClick*)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, g_recClicks, newCap * sizeof(RecordedClick));
+        }
         if (!newArr) return;
         g_recClicks = newArr;
         g_recClickCap = newCap;
@@ -361,8 +383,7 @@ static void AddRecordedClick(LONG x, LONG y, DWORD timestamp, BYTE* bmpData, DWO
     rc->bmpData = bmpData;
     rc->bmpSize = bmpSize;
     if (text) {
-        strncpy(rc->text, text, sizeof(rc->text) - 1);
-        rc->text[sizeof(rc->text) - 1] = '\0';
+        lstrcpynA(rc->text, text, sizeof(rc->text));
     } else {
         rc->text[0] = '\0';
     }
@@ -385,44 +406,52 @@ static const char* GetActionName(DWORD actionType) {
 }
 
 static void GetTargetDescription(const TTPStep* step, char* buf, size_t bufSize) {
+    (void)bufSize;
     if (step->actionType == TTP_ACTION_TYPE_TEXT) {
-        snprintf(buf, bufSize, "\"%s\"", step->textKey);
+        wsprintfA(buf, "\"%s\"", step->textKey);
         return;
     }
     if (step->actionType == TTP_ACTION_DRAG) {
-        snprintf(buf, bufSize, "(%ld,%ld)->(%ld,%ld)", step->origX, step->origY, step->destX, step->destY);
+        wsprintfA(buf, "(%ld,%ld)->(%ld,%ld)", step->origX, step->origY, step->destX, step->destY);
         return;
     }
     if (step->targetMode == TTP_TARGET_TEXT && step->textKey[0] != '\0') {
-        snprintf(buf, bufSize, "[%s] (Text)", step->textKey);
+        wsprintfA(buf, "[%s] (Text)", step->textKey);
         return;
     }
     if (step->targetMode == TTP_TARGET_IMAGE) {
-        snprintf(buf, bufSize, "Image Anchor (%ld,%ld)", step->origX, step->origY);
+        wsprintfA(buf, "Image Anchor (%ld,%ld)", step->origX, step->origY);
         return;
     }
-    snprintf(buf, bufSize, "(%ld,%ld)", step->origX, step->origY);
+    wsprintfA(buf, "(%ld,%ld)", step->origX, step->origY);
 }
 
 static void FormatTimeoutSecondsString(const TTPStep* step, char* buf, size_t bufSize) {
-    double sec = (double)step->timeoutMs / 1000.0;
-    snprintf(buf, bufSize, "%.1fs", sec);
+    (void)bufSize;
+    DWORD total_tenths = (step->timeoutMs + 50) / 100;
+    DWORD sec_whole = total_tenths / 10;
+    DWORD sec_frac = total_tenths % 10;
+    wsprintfA(buf, "%lu.%lus", sec_whole, sec_frac);
 }
 
 static void FormatTimeoutPolicyString(const TTPStep* step, char* buf, size_t bufSize) {
+    (void)bufSize;
     int act = TTP_GET_TIMEOUT_ACTION(step->targetMode);
-    if (act == TTP_TIMEOUT_ACT_RETRY) snprintf(buf, bufSize, "[Retry]");
-    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) snprintf(buf, bufSize, "[Coord]");
-    else if (act == TTP_TIMEOUT_ACT_SKIP) snprintf(buf, bufSize, "[Skip]");
-    else if (act == TTP_TIMEOUT_ACT_STOP) snprintf(buf, bufSize, "[Stop]");
-    else snprintf(buf, bufSize, "[Prompt]");
+    if (act == TTP_TIMEOUT_ACT_RETRY) wsprintfA(buf, "[Retry]");
+    else if (act == TTP_TIMEOUT_ACT_USE_RECORDED) wsprintfA(buf, "[Coord]");
+    else if (act == TTP_TIMEOUT_ACT_SKIP) wsprintfA(buf, "[Skip]");
+    else if (act == TTP_TIMEOUT_ACT_STOP) wsprintfA(buf, "[Stop]");
+    else wsprintfA(buf, "[Prompt]");
 }
 
 static void FormatTimeoutString(const TTPStep* step, char* buf, size_t bufSize) {
-    double sec = (double)step->timeoutMs / 1000.0;
+    (void)bufSize;
+    DWORD total_tenths = (step->timeoutMs + 50) / 100;
+    DWORD sec_whole = total_tenths / 10;
+    DWORD sec_frac = total_tenths % 10;
     char pol[32];
     FormatTimeoutPolicyString(step, pol, sizeof(pol));
-    snprintf(buf, bufSize, "%.1fs %s", sec, pol);
+    wsprintfA(buf, "%lu.%lus %s", sec_whole, sec_frac, pol);
 }
 
 static double parse_seconds(const char* s) {
@@ -455,11 +484,11 @@ static void ParseTimeoutString(const char* str, DWORD* outTimeoutMs, int* outAct
     if (outTimeoutMs) *outTimeoutMs = (DWORD)(sec * 1000.0 + 0.5);
 
     if (outAction) {
-        if (strstr(str, "retry") || strstr(str, "Retry") || strstr(str, " 1")) *outAction = TTP_TIMEOUT_ACT_RETRY;
-        else if (strstr(str, "coord") || strstr(str, "Coord") || strstr(str, " 2")) *outAction = TTP_TIMEOUT_ACT_USE_RECORDED;
-        else if (strstr(str, "skip") || strstr(str, "Skip") || strstr(str, " 3")) *outAction = TTP_TIMEOUT_ACT_SKIP;
-        else if (strstr(str, "stop") || strstr(str, "Stop") || strstr(str, " 4")) *outAction = TTP_TIMEOUT_ACT_STOP;
-        else if (strstr(str, "prompt") || strstr(str, "Prompt") || strstr(str, " 0")) *outAction = TTP_TIMEOUT_ACT_DEFAULT;
+        if (ttp_strstr(str, "retry") || ttp_strstr(str, "Retry") || ttp_strstr(str, " 1")) *outAction = TTP_TIMEOUT_ACT_RETRY;
+        else if (ttp_strstr(str, "coord") || ttp_strstr(str, "Coord") || ttp_strstr(str, " 2")) *outAction = TTP_TIMEOUT_ACT_USE_RECORDED;
+        else if (ttp_strstr(str, "skip") || ttp_strstr(str, "Skip") || ttp_strstr(str, " 3")) *outAction = TTP_TIMEOUT_ACT_SKIP;
+        else if (ttp_strstr(str, "stop") || ttp_strstr(str, "Stop") || ttp_strstr(str, " 4")) *outAction = TTP_TIMEOUT_ACT_STOP;
+        else if (ttp_strstr(str, "prompt") || ttp_strstr(str, "Prompt") || ttp_strstr(str, " 0")) *outAction = TTP_TIMEOUT_ACT_DEFAULT;
     }
 }
 
@@ -967,9 +996,11 @@ static BOOL IsTrailingHotkeyStep(const TTPStep* step, const HotkeyState* hk, cha
             return TRUE;
         }
     } else if (step->actionType == TTP_ACTION_TYPE_TEXT) {
-        if (targetVk != 0 && strlen(step->textKey) == 1) {
+        if (targetVk != 0 && step->textKey[0] != '\0' && step->textKey[1] == '\0') {
             char c = step->textKey[0];
-            if (c == (char)targetVk || c == (char)tolower((int)targetVk) || c == (char)toupper((int)targetVk)) {
+            char c_low = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+            char t_low = (targetVk >= 'A' && targetVk <= 'Z') ? (char)(targetVk + 32) : (char)targetVk;
+            if (c == (char)targetVk || c_low == t_low) {
                 return TRUE;
             }
         }
@@ -1052,10 +1083,10 @@ static void RefreshListView(void) {
 
     for (DWORD i = 0; i < g_stepCount; i++) {
         char numStr[16];
-        snprintf(numStr, sizeof(numStr), "%lu", (unsigned long)(i + 1));
+        wsprintfA(numStr, "%lu", (unsigned long)(i + 1));
 
         LVITEMA lvi;
-        memset(&lvi, 0, sizeof(lvi));
+        __builtin_memset(&lvi, 0, sizeof(lvi));
         lvi.mask = LVIF_TEXT;
         lvi.iItem = i;
         lvi.iSubItem = 0;
@@ -1078,9 +1109,9 @@ static void RefreshListView(void) {
 
         char assetStr[32];
         if (g_bmpBuffers && g_bmpBuffers[i] && g_bmpSizes[i] > 0) {
-            snprintf(assetStr, sizeof(assetStr), "[BMP]");
+            lstrcpyA(assetStr, "[BMP]");
         } else {
-            snprintf(assetStr, sizeof(assetStr), "-");
+            lstrcpyA(assetStr, "-");
         }
         ListView_SetItemText(g_hListView, i, 5, assetStr);
     }
@@ -1145,8 +1176,10 @@ static void StartInPlaceTimeoutEdit(int item) {
     ListView_GetSubItemRect(g_hListView, item, 3, LVIR_BOUNDS, &rcSub);
 
     char valStr[32];
-    double sec = (double)g_steps[item].timeoutMs / 1000.0;
-    snprintf(valStr, sizeof(valStr), "%.1f", sec);
+    DWORD total_tenths = (g_steps[item].timeoutMs + 50) / 100;
+    DWORD sec_whole = total_tenths / 10;
+    DWORD sec_frac = total_tenths % 10;
+    wsprintfA(valStr, "%lu.%lu", sec_whole, sec_frac);
 
     int editW = rcSub.right - rcSub.left;
     int editH = rcSub.bottom - rcSub.top;
@@ -1230,7 +1263,7 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
 
     BITMAPINFOHEADER* bmih = (BITMAPINFOHEADER*)(bmpData + sizeof(BITMAPFILEHEADER));
     int tw = bmih->biWidth;
-    int th = abs(bmih->biHeight);
+    int th = __builtin_abs(bmih->biHeight);
     int bpp = bmih->biBitCount;
     if (tw <= 0 || th <= 0) return TRUE;
 
@@ -1239,7 +1272,7 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
         int dstStride = tw * 4;
         DWORD dstPixelDataSize = (DWORD)dstStride * th;
         DWORD dstTotalSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + dstPixelDataSize;
-        BYTE* newBuf = (BYTE*)malloc(dstTotalSize);
+        BYTE* newBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dstTotalSize);
         if (newBuf) {
             BITMAPFILEHEADER* newBmfh = (BITMAPFILEHEADER*)newBuf;
             newBmfh->bfType = 0x4D42;
@@ -1249,7 +1282,7 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
             newBmfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
 
             BITMAPINFOHEADER* newBmih = (BITMAPINFOHEADER*)(newBuf + sizeof(BITMAPFILEHEADER));
-            memcpy(newBmih, bmih, sizeof(BITMAPINFOHEADER));
+            __builtin_memcpy(newBmih, bmih, sizeof(BITMAPINFOHEADER));
             newBmih->biBitCount = 32;
             newBmih->biSizeImage = dstPixelDataSize;
 
@@ -1265,7 +1298,7 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
                     dRow[x * 4 + 3] = 255;
                 }
             }
-            free(bmpData);
+            HeapFree(GetProcessHeap(), 0, bmpData);
             g_bmpBuffers[stepIndex] = newBuf;
             g_bmpSizes[stepIndex] = dstTotalSize;
             bmpData = newBuf;
@@ -1279,14 +1312,14 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
         BYTE* pixelData = bmpData + bmfh->bfOffBits;
         int totalPixels = tw * th;
         if (newTol > 0) {
-            BYTE* mask = (BYTE*)malloc((size_t)totalPixels);
+            BYTE* mask = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)totalPixels);
             if (mask) {
                 if (ttp_chromakey_mask(pixelData, tw, th, 4, (BYTE)newTol, mask)) {
                     for (int i = 0; i < totalPixels; i++) {
                         pixelData[i * 4 + 3] = mask[i] ? 255 : 0;
                     }
                 }
-                free(mask);
+                HeapFree(GetProcessHeap(), 0, mask);
             }
         } else {
             for (int i = 0; i < totalPixels; i++) {
@@ -1299,7 +1332,7 @@ static BOOL StepEdit_ApplyChromaTolerance(int stepIndex, int newTol) {
 }
 
 static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
-    BYTE* canvasPixels = (BYTE*)malloc((size_t)cw * ch * 4);
+    BYTE* canvasPixels = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)cw * ch * 4);
     if (!canvasPixels) return;
 
     /* 1. 8x8 alternating light gray (RGB 230,230,230) and white (RGB 255,255,255) checkerboard */
@@ -1325,7 +1358,7 @@ static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
         const BITMAPINFOHEADER* bmih = (const BITMAPINFOHEADER*)(bmpData + sizeof(BITMAPFILEHEADER));
         if (bmfh->bfType == 0x4D42 && bmih->biWidth > 0 && bmih->biHeight != 0) {
             int tw = bmih->biWidth;
-            int th = abs(bmih->biHeight);
+            int th = __builtin_abs(bmih->biHeight);
             BOOL isBottomUp = (bmih->biHeight > 0);
             int bpp = bmih->biBitCount;
             if (bpp == 24 || bpp == 32) {
@@ -1337,19 +1370,19 @@ static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
                     const BYTE* maskSrc = pixelData;
                     BYTE* contigBuf = NULL;
                     if (bpp == 24 && stride != tw * 3) {
-                        contigBuf = (BYTE*)malloc((size_t)tw * th * 3);
+                        contigBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)tw * th * 3);
                         if (contigBuf) {
                             for (int y = 0; y < th; y++) {
-                                memcpy(contigBuf + y * (tw * 3), pixelData + y * stride, tw * 3);
+                                __builtin_memcpy(contigBuf + y * (tw * 3), pixelData + y * stride, tw * 3);
                             }
                             maskSrc = contigBuf;
                         }
                     }
 
-                    BYTE* mask = (BYTE*)malloc((size_t)tw * th);
+                    BYTE* mask = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)tw * th);
                     if (mask) {
                         if (s_StepEditCurrentTol == 0) {
-                            memset(mask, 1, (size_t)tw * th);
+                            __builtin_memset(mask, 1, (size_t)tw * th);
                         } else {
                             ttp_chromakey_mask(maskSrc, tw, th, bpp / 8, (BYTE)s_StepEditCurrentTol, mask);
                         }
@@ -1388,16 +1421,16 @@ static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
                                 }
                             }
                         }
-                        free(mask);
+                        HeapFree(GetProcessHeap(), 0, mask);
                     }
-                    if (contigBuf) free(contigBuf);
+                    if (contigBuf) HeapFree(GetProcessHeap(), 0, contigBuf);
                 }
             }
         }
     }
 
     BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
+    __builtin_memset(&bi, 0, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = cw;
     bi.bmiHeader.biHeight = -ch; /* top-down */
@@ -1416,7 +1449,7 @@ static void PreviewCanvas_Paint(HDC hdc, int cw, int ch) {
         SelectObject(hdc, hOld);
     }
 
-    free(canvasPixels);
+    HeapFree(GetProcessHeap(), 0, canvasPixels);
 }
 
 static LRESULT CALLBACK PreviewCanvasWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -1451,7 +1484,7 @@ static LRESULT CALLBACK StepEditDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             TTPStep* s = &g_steps[s_StepEditIndex];
             char targetDesc[128] = "";
             GetTargetDescription(s, targetDesc, sizeof(targetDesc));
-            snprintf(headerText, sizeof(headerText), "Step #%d: %s at %s",
+            wsprintfA(headerText, "Step #%d: %s at %s",
                 s_StepEditIndex + 1, GetActionName(s->actionType), targetDesc);
         }
 
@@ -1471,7 +1504,7 @@ static LRESULT CALLBACK StepEditDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         SendMessageA(s_hStepEditCheckMask, BM_SETCHECK, (s_StepEditCurrentTol > 0) ? BST_CHECKED : BST_UNCHECKED, 0);
 
         char tolText[64];
-        snprintf(tolText, sizeof(tolText), "Transparency Tolerance: %d", s_StepEditCurrentTol);
+        wsprintfA(tolText, "Transparency Tolerance: %d", s_StepEditCurrentTol);
         s_hStepEditTolLabel = CreateWindowExA(0, "STATIC", tolText,
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             50, 260, 280, 18, hwnd, (HMENU)ID_STEPEDIT_LABEL_TOL, g_hInstance, NULL);
@@ -1519,7 +1552,7 @@ static LRESULT CALLBACK StepEditDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             s_StepEditCurrentTol = pos;
 
             char buf[64];
-            snprintf(buf, sizeof(buf), "Transparency Tolerance: %d", pos);
+            wsprintfA(buf, "Transparency Tolerance: %d", pos);
             SetWindowTextA(s_hStepEditTolLabel, buf);
 
             if (pos > 0) {
@@ -1552,7 +1585,7 @@ static LRESULT CALLBACK StepEditDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 SendMessageA(s_hStepEditTrackbar, TBM_SETPOS, TRUE, 0);
             }
             char buf[64];
-            snprintf(buf, sizeof(buf), "Transparency Tolerance: %d", s_StepEditCurrentTol);
+            wsprintfA(buf, "Transparency Tolerance: %d", s_StepEditCurrentTol);
             SetWindowTextA(s_hStepEditTolLabel, buf);
 
             InvalidateRect(s_hStepEditCanvas, NULL, FALSE);
@@ -1679,24 +1712,27 @@ static void ShowStepEditDialog(HWND hParent, int stepIndex) {
  * ========================================================================= */
 
 static void FormatTitleRec(DWORD elapsedSec, DWORD steps, char* buf, size_t bufSize) {
+    (void)bufSize;
     DWORD mm = elapsedSec / 60;
     DWORD ss = elapsedSec % 60;
-    snprintf(buf, bufSize, "REC %02lu:%02lu (%lu steps)", (unsigned long)mm, (unsigned long)ss, (unsigned long)steps);
+    wsprintfA(buf, "REC %02lu:%02lu (%lu steps)", (unsigned long)mm, (unsigned long)ss, (unsigned long)steps);
 }
 
 static void FormatTitlePlay(DWORD elapsedSec, DWORD stepIdx1Based, DWORD totalSteps, char* buf, size_t bufSize) {
+    (void)bufSize;
     DWORD mm = elapsedSec / 60;
     DWORD ss = elapsedSec % 60;
-    snprintf(buf, bufSize, "PLAY %02lu:%02lu (Step %lu/%lu)",
+    wsprintfA(buf, "PLAY %02lu:%02lu (Step %lu/%lu)",
         (unsigned long)mm, (unsigned long)ss,
         (unsigned long)stepIdx1Based, (unsigned long)(totalSteps > 0 ? totalSteps : 1));
 }
 
 static void FormatTitleIdle(const char* filename, char* buf, size_t bufSize) {
+    (void)bufSize;
     if (filename && filename[0]) {
-        snprintf(buf, bufSize, "TinyTask Pro - %s", filename);
+        wsprintfA(buf, "TinyTask Pro - %s", filename);
     } else {
-        snprintf(buf, bufSize, "TinyTask Pro");
+        lstrcpyA(buf, "TinyTask Pro");
     }
 }
 
@@ -1823,7 +1859,7 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
             char rootTitle[128] = {0};
             HWND hRoot = GetAncestor(hUnder, GA_ROOT);
             if (hRoot && GetWindowTextA(hRoot, rootTitle, sizeof(rootTitle)) > 0) {
-                if (_stricmp(accName, rootTitle) == 0) {
+                if (lstrcmpiA(accName, rootTitle) == 0) {
                     accName[0] = '\0';
                 }
             }
@@ -1911,7 +1947,7 @@ static void StopRecording(void) {
             RecordedClick* rc = &g_recClicks[bestClickIdx];
             if (rc->text[0] != '\0') {
                 tempSteps[i].targetMode = TTP_TARGET_TEXT;
-                strncpy(tempSteps[i].textKey, rc->text, sizeof(tempSteps[i].textKey) - 1);
+                lstrcpynA(tempSteps[i].textKey, rc->text, sizeof(tempSteps[i].textKey));
             } else if (rc->bmpData != NULL && rc->bmpSize > 0) {
                 tempSteps[i].targetMode = TTP_TARGET_IMAGE;
             } else {
@@ -2072,7 +2108,7 @@ static void CompileToExe(HWND hwnd, const char* outPath) {
         TTPEndTrailer oldTrailer;
         DWORD readBytes = 0;
         ReadFile(hFile, &oldTrailer, sizeof(oldTrailer), &readBytes, NULL);
-        if (readBytes == sizeof(oldTrailer) && memcmp(oldTrailer.magic, "TTP_EXE\0", 8) == 0) {
+        if (readBytes == sizeof(oldTrailer) && ttp_memcmp8(oldTrailer.magic, "TTP_EXE\0") == 0) {
             origSize = oldTrailer.originalExeSize;
             SetFilePointer(hFile, origSize, NULL, FILE_BEGIN);
             SetEndOfFile(hFile);
@@ -2095,17 +2131,17 @@ static void CompileToExe(HWND hwnd, const char* outPath) {
     HANDLE hTemp = CreateFileA(tempTtp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hTemp != INVALID_HANDLE_VALUE) {
         DWORD ttpSize = GetFileSize(hTemp, NULL);
-        BYTE* tempBuf = (BYTE*)malloc(ttpSize);
+        BYTE* tempBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ttpSize);
         if (tempBuf) {
             DWORD readBytes = 0;
             ReadFile(hTemp, tempBuf, ttpSize, &readBytes, NULL);
             SetFilePointer(hFile, origSize, NULL, FILE_BEGIN);
             DWORD written = 0;
             WriteFile(hFile, tempBuf, ttpSize, &written, NULL);
-            free(tempBuf);
+            HeapFree(GetProcessHeap(), 0, tempBuf);
 
             TTPEndTrailer trailer;
-            memcpy(trailer.magic, "TTP_EXE\0", 8);
+            __builtin_memcpy(trailer.magic, "TTP_EXE\0", 8);
             trailer.payloadSize = ttpSize;
             trailer.originalExeSize = origSize;
             WriteFile(hFile, &trailer, sizeof(trailer), &written, NULL);
@@ -2116,7 +2152,7 @@ static void CompileToExe(HWND hwnd, const char* outPath) {
     CloseHandle(hFile);
 
     char msg[300];
-    snprintf(msg, sizeof(msg), "Compile successful!\n\nStandalone executable created:\n\"%s\"\n(%lu steps with embedded vision assets)", outPath, (unsigned long)g_stepCount);
+    wsprintfA(msg, "Compile successful!\n\nStandalone executable created:\n\"%s\"\n(%lu steps with embedded vision assets)", outPath, (unsigned long)g_stepCount);
     MessageBoxA(hwnd, msg, "TinyTask Pro", MB_ICONINFORMATION);
 }
 
@@ -2135,10 +2171,10 @@ static void CheckSelfOverlay(HWND hwnd) {
         DWORD readBytes = 0;
         ReadFile(hFile, &trailer, sizeof(trailer), &readBytes, NULL);
 
-        if (readBytes == sizeof(trailer) && memcmp(trailer.magic, "TTP_EXE\0", 8) == 0 &&
+        if (readBytes == sizeof(trailer) && ttp_memcmp8(trailer.magic, "TTP_EXE\0") == 0 &&
             trailer.originalExeSize + trailer.payloadSize + sizeof(TTPEndTrailer) == fSize) {
             SetFilePointer(hFile, trailer.originalExeSize, NULL, FILE_BEGIN);
-            BYTE* pPayload = (BYTE*)malloc(trailer.payloadSize);
+            BYTE* pPayload = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, trailer.payloadSize);
             if (pPayload) {
                 ReadFile(hFile, pPayload, trailer.payloadSize, &readBytes, NULL);
                 CloseHandle(hFile);
@@ -2149,11 +2185,12 @@ static void CheckSelfOverlay(HWND hwnd) {
                 char tempTtp[MAX_PATH];
                 GetTempFileNameA(tempPath, "ttp", 0, tempTtp);
 
-                FILE* fp = fopen(tempTtp, "wb");
-                if (fp) {
-                    fwrite(pPayload, 1, trailer.payloadSize, fp);
-                    fclose(fp);
-                    free(pPayload);
+                HANDLE hTempOut = CreateFileA(tempTtp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hTempOut != INVALID_HANDLE_VALUE) {
+                    DWORD written = 0;
+                    WriteFile(hTempOut, pPayload, trailer.payloadSize, &written, NULL);
+                    CloseHandle(hTempOut);
+                    HeapFree(GetProcessHeap(), 0, pPayload);
 
                     if (LoadProjectFile(tempTtp)) {
                         g_IsStandalonePayload = TRUE;
@@ -2163,7 +2200,7 @@ static void CheckSelfOverlay(HWND hwnd) {
                     }
                     DeleteFileA(tempTtp);
                 } else {
-                    free(pPayload);
+                    HeapFree(GetProcessHeap(), 0, pPayload);
                 }
                 return;
             }
@@ -2276,7 +2313,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         /* Add columns: #, Action, Target, Timeout, On Timeout, Asset */
         LVCOLUMNA lvc;
-        memset(&lvc, 0, sizeof(lvc));
+        __builtin_memset(&lvc, 0, sizeof(lvc));
         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
 
         for (int i = 0; i < DRAWER_COLUMN_COUNT; i++) {
@@ -2328,7 +2365,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             int drawH = BUTTON_HEIGHT - g_HideCaptionsOffset;
             for (int i = 0; i < NUM_BUTTONS; i++) {
                 TOOLINFOA ti;
-                memset(&ti, 0, sizeof(ti));
+                __builtin_memset(&ti, 0, sizeof(ti));
                 ti.cbSize = sizeof(TOOLINFOA);
                 ti.uFlags = TTF_SUBCLASS;
                 ti.hwnd = hwnd;
@@ -2496,7 +2533,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameA(&ofn)) {
                 if (LoadProjectFile(path)) {
-                    strncpy(g_CurrentFileName, path, MAX_PATH - 1);
+                    lstrcpynA(g_CurrentFileName, path, MAX_PATH);
                     RefreshListView();
                     UpdateTitle();
                 } else {
@@ -2509,9 +2546,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case ID_PRO_SAVE: {
             char path[MAX_PATH] = "";
             if (g_CurrentFileName[0]) {
-                strncpy(path, g_CurrentFileName, MAX_PATH - 1);
+                lstrcpynA(path, g_CurrentFileName, MAX_PATH);
             } else {
-                strcpy(path, "macro.ttp");
+                lstrcpyA(path, "macro.ttp");
             }
             OPENFILENAMEA ofn = {0};
             ofn.lStructSize = sizeof(ofn);
@@ -2523,7 +2560,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             ofn.Flags = OFN_OVERWRITEPROMPT;
             if (GetSaveFileNameA(&ofn)) {
                 if (SaveProjectFile(path)) {
-                    strncpy(g_CurrentFileName, path, MAX_PATH - 1);
+                    lstrcpynA(g_CurrentFileName, path, MAX_PATH);
                     UpdateTitle();
                 } else {
                     MessageBoxA(hwnd, "Failed to save project file.", "TinyTask Pro", MB_ICONERROR);
@@ -2681,7 +2718,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             ofn.nMaxFile = MAX_PATH;
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameA(&ofn)) {
-                strncpy(g_CustomToolbarPath, path, MAX_PATH - 1);
+                lstrcpynA(g_CustomToolbarPath, path, MAX_PATH);
                 g_HasCustomToolbar = TRUE;
                 CreateToolbarBitmaps();
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -2751,7 +2788,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         case ID_BTN_ADD_STEP: {
             TTPStep s;
-            memset(&s, 0, sizeof(s));
+            __builtin_memset(&s, 0, sizeof(s));
             s.actionType = TTP_ACTION_CLICK;
             s.targetMode = TTP_TARGET_COORD;
             s.origX = 100;
@@ -2931,5 +2968,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     return (int)msg.wParam;
+}
+
+void WinMainCRTStartup(void) {
+    HINSTANCE hInst = GetModuleHandleA(NULL);
+    LPSTR lpCmdLine = GetCommandLineA();
+
+    /* Robust command-line parsing to skip exe name */
+    if (*lpCmdLine == '"') {
+        lpCmdLine++;
+        while (*lpCmdLine && *lpCmdLine != '"') lpCmdLine++;
+        if (*lpCmdLine == '"') lpCmdLine++;
+    } else {
+        while (*lpCmdLine && *lpCmdLine > ' ') lpCmdLine++;
+    }
+    while (*lpCmdLine && *lpCmdLine <= ' ') lpCmdLine++;
+
+    int ret = WinMain(hInst, NULL, lpCmdLine, SW_SHOWDEFAULT);
+    ExitProcess((UINT)ret);
 }
 #endif
