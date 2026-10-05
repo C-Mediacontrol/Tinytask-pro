@@ -1,6 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include "ttp_storage.h"
 
 /* Helper: Promote 24bpp BMP to 32bpp BGRA with A=255 for seamless backward compatibility */
@@ -24,7 +25,7 @@ static BYTE* convert_24bpp_to_32bpp(const BYTE* src, DWORD srcSize, DWORD* outSi
     }
 
     int w = bmih->biWidth;
-    int h = abs(bmih->biHeight);
+    int h = __builtin_abs(bmih->biHeight);
     if (w <= 0 || h <= 0) {
         return NULL;
     }
@@ -39,7 +40,7 @@ static BYTE* convert_24bpp_to_32bpp(const BYTE* src, DWORD srcSize, DWORD* outSi
     DWORD dstPixelDataSize = (DWORD)dstStride * h;
     DWORD dstTotalSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + dstPixelDataSize;
 
-    BYTE* dst = (BYTE*)malloc(dstTotalSize);
+    BYTE* dst = (BYTE*)HeapAlloc(GetProcessHeap(), 0, dstTotalSize);
     if (!dst) {
         return NULL;
     }
@@ -52,7 +53,7 @@ static BYTE* convert_24bpp_to_32bpp(const BYTE* src, DWORD srcSize, DWORD* outSi
     dstBmfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
 
     BITMAPINFOHEADER* dstBmih = (BITMAPINFOHEADER*)(dst + sizeof(BITMAPFILEHEADER));
-    memcpy(dstBmih, bmih, sizeof(BITMAPINFOHEADER));
+    __builtin_memcpy(dstBmih, bmih, sizeof(BITMAPINFOHEADER));
     dstBmih->biSize = sizeof(BITMAPINFOHEADER);
     dstBmih->biBitCount = 32;
     dstBmih->biCompression = BI_RGB;
@@ -84,31 +85,32 @@ BOOL ttp_save_project(const char* filepath, const TTPStep* steps, DWORD stepCoun
         return FALSE;
     }
 
-    FILE* fp = fopen(filepath, "wb");
-    if (!fp) {
+    HANDLE hFile = CreateFileA(filepath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
 
     TTPHeader header;
-    memset(&header, 0, sizeof(header));
-    memcpy(header.magic, TTP_MAGIC, 4);
+    __builtin_memset(&header, 0, sizeof(header));
+    __builtin_memcpy(header.magic, TTP_MAGIC, 4);
     header.version = TTP_VERSION;
     header.stepCount = stepCount;
     header.flags = 0;
 
-    if (fwrite(&header, sizeof(TTPHeader), 1, fp) != 1) {
-        fclose(fp);
+    DWORD dwWritten = 0;
+    if (!WriteFile(hFile, &header, sizeof(TTPHeader), &dwWritten, NULL) || dwWritten != sizeof(TTPHeader)) {
+        CloseHandle(hFile);
         return FALSE;
     }
 
     TTPStep* stepsCopy = NULL;
     if (stepCount > 0) {
-        stepsCopy = (TTPStep*)malloc(sizeof(TTPStep) * stepCount);
+        stepsCopy = (TTPStep*)HeapAlloc(GetProcessHeap(), 0, sizeof(TTPStep) * stepCount);
         if (!stepsCopy) {
-            fclose(fp);
+            CloseHandle(hFile);
             return FALSE;
         }
-        memcpy(stepsCopy, steps, sizeof(TTPStep) * stepCount);
+        __builtin_memcpy(stepsCopy, steps, sizeof(TTPStep) * stepCount);
 
         DWORD currentBlobOffset = (DWORD)(sizeof(TTPHeader) + stepCount * sizeof(TTPStep));
         for (DWORD i = 0; i < stepCount; i++) {
@@ -122,26 +124,33 @@ BOOL ttp_save_project(const char* filepath, const TTPStep* steps, DWORD stepCoun
             }
         }
 
-        if (fwrite(stepsCopy, sizeof(TTPStep), stepCount, fp) != stepCount) {
-            free(stepsCopy);
-            fclose(fp);
+        DWORD stepsBytes = sizeof(TTPStep) * stepCount;
+        if (!WriteFile(hFile, stepsCopy, stepsBytes, &dwWritten, NULL) || dwWritten != stepsBytes) {
+            if (stepsCopy) {
+                HeapFree(GetProcessHeap(), 0, stepsCopy);
+            }
+            CloseHandle(hFile);
             return FALSE;
         }
 
         for (DWORD i = 0; i < stepCount; i++) {
             if (stepsCopy[i].imageSize > 0 && bmpBuffers && bmpBuffers[i] != NULL) {
-                if (fwrite(bmpBuffers[i], 1, stepsCopy[i].imageSize, fp) != stepsCopy[i].imageSize) {
-                    free(stepsCopy);
-                    fclose(fp);
+                if (!WriteFile(hFile, bmpBuffers[i], stepsCopy[i].imageSize, &dwWritten, NULL) || dwWritten != stepsCopy[i].imageSize) {
+                    if (stepsCopy) {
+                        HeapFree(GetProcessHeap(), 0, stepsCopy);
+                    }
+                    CloseHandle(hFile);
                     return FALSE;
                 }
             }
         }
 
-        free(stepsCopy);
+        if (stepsCopy) {
+            HeapFree(GetProcessHeap(), 0, stepsCopy);
+        }
     }
 
-    fclose(fp);
+    CloseHandle(hFile);
     return TRUE;
 }
 
@@ -155,24 +164,26 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
     *outBmpBuffers = NULL;
     *outBmpSizes = NULL;
 
-    FILE* fp = fopen(filepath, "rb");
-    if (!fp) {
+    HANDLE hFile = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
 
     TTPHeader header;
-    if (fread(&header, sizeof(TTPHeader), 1, fp) != 1) {
-        fclose(fp);
+    DWORD dwRead = 0;
+    if (!ReadFile(hFile, &header, sizeof(TTPHeader), &dwRead, NULL) || dwRead != sizeof(TTPHeader)) {
+        CloseHandle(hFile);
         return FALSE;
     }
 
-    if (memcmp(header.magic, TTP_MAGIC, 4) != 0) {
-        fclose(fp);
+    if (header.magic[0] != TTP_MAGIC[0] || header.magic[1] != TTP_MAGIC[1] ||
+        header.magic[2] != TTP_MAGIC[2] || header.magic[3] != TTP_MAGIC[3]) {
+        CloseHandle(hFile);
         return FALSE;
     }
 
     if (header.version < 1) {
-        fclose(fp);
+        CloseHandle(hFile);
         return FALSE;
     }
 
@@ -184,27 +195,32 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
     if (count > 0) {
         if (header.version == TTP_VERSION_LEGACY) {
             /* Legacy version 1: read 172-byte TTPStep_v1 and map to TTPStep */
-            TTPStep_v1* legacySteps = (TTPStep_v1*)malloc(sizeof(TTPStep_v1) * count);
+            DWORD legacyBytes = sizeof(TTPStep_v1) * count;
+            TTPStep_v1* legacySteps = (TTPStep_v1*)HeapAlloc(GetProcessHeap(), 0, legacyBytes);
             if (!legacySteps) {
-                fclose(fp);
+                CloseHandle(hFile);
                 return FALSE;
             }
 
-            if (fread(legacySteps, sizeof(TTPStep_v1), count, fp) != count) {
-                free(legacySteps);
-                fclose(fp);
+            if (!ReadFile(hFile, legacySteps, legacyBytes, &dwRead, NULL) || dwRead != legacyBytes) {
+                if (legacySteps) {
+                    HeapFree(GetProcessHeap(), 0, legacySteps);
+                }
+                CloseHandle(hFile);
                 return FALSE;
             }
 
-            steps = (TTPStep*)malloc(sizeof(TTPStep) * count);
+            steps = (TTPStep*)HeapAlloc(GetProcessHeap(), 0, sizeof(TTPStep) * count);
             if (!steps) {
-                free(legacySteps);
-                fclose(fp);
+                if (legacySteps) {
+                    HeapFree(GetProcessHeap(), 0, legacySteps);
+                }
+                CloseHandle(hFile);
                 return FALSE;
             }
 
             for (DWORD i = 0; i < count; i++) {
-                memset(&steps[i], 0, sizeof(TTPStep));
+                __builtin_memset(&steps[i], 0, sizeof(TTPStep));
                 steps[i].stepId = legacySteps[i].stepId;
                 steps[i].actionType = legacySteps[i].actionType;
                 steps[i].targetMode = legacySteps[i].targetMode;
@@ -214,7 +230,7 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
                 steps[i].destY = legacySteps[i].destY;
                 steps[i].timeoutMs = legacySteps[i].timeoutMs;
                 steps[i].postDelayMs = legacySteps[i].postDelayMs;
-                memcpy(steps[i].textKey, legacySteps[i].textKey, sizeof(steps[i].textKey));
+                __builtin_memcpy(steps[i].textKey, legacySteps[i].textKey, sizeof(steps[i].textKey));
                 steps[i].imageOffset = legacySteps[i].imageOffset;
                 steps[i].imageSize = legacySteps[i].imageSize;
                 steps[i].chromaTol = 0; /* Legacy default: disabled */
@@ -222,51 +238,64 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
                 steps[i].reserved[1] = 0;
                 steps[i].reserved[2] = 0;
             }
-            free(legacySteps);
+            if (legacySteps) {
+                HeapFree(GetProcessHeap(), 0, legacySteps);
+            }
         } else {
             /* Version 2 and later: read current 176-byte TTPStep */
-            steps = (TTPStep*)malloc(sizeof(TTPStep) * count);
+            DWORD stepsBytes = sizeof(TTPStep) * count;
+            steps = (TTPStep*)HeapAlloc(GetProcessHeap(), 0, stepsBytes);
             if (!steps) {
-                fclose(fp);
+                CloseHandle(hFile);
                 return FALSE;
             }
 
-            if (fread(steps, sizeof(TTPStep), count, fp) != count) {
-                free(steps);
-                fclose(fp);
+            if (!ReadFile(hFile, steps, stepsBytes, &dwRead, NULL) || dwRead != stepsBytes) {
+                if (steps) {
+                    HeapFree(GetProcessHeap(), 0, steps);
+                }
+                CloseHandle(hFile);
                 return FALSE;
             }
         }
 
-        bmpBuffers = (BYTE**)calloc(count, sizeof(BYTE*));
-        bmpSizes = (DWORD*)calloc(count, sizeof(DWORD));
+        bmpBuffers = (BYTE**)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)count * sizeof(BYTE*));
+        bmpSizes = (DWORD*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)count * sizeof(DWORD));
         if (!bmpBuffers || !bmpSizes) {
-            if (bmpBuffers) free(bmpBuffers);
-            if (bmpSizes) free(bmpSizes);
-            free(steps);
-            fclose(fp);
+            if (bmpBuffers) {
+                HeapFree(GetProcessHeap(), 0, bmpBuffers);
+            }
+            if (bmpSizes) {
+                HeapFree(GetProcessHeap(), 0, bmpSizes);
+            }
+            if (steps) {
+                HeapFree(GetProcessHeap(), 0, steps);
+            }
+            CloseHandle(hFile);
             return FALSE;
         }
 
         for (DWORD i = 0; i < count; i++) {
             if (steps[i].imageSize > 0) {
-                if (fseek(fp, (long)steps[i].imageOffset, SEEK_SET) != 0) {
+                if (SetFilePointer(hFile, (LONG)steps[i].imageOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
                     ttp_free_project(steps, bmpBuffers, bmpSizes, count);
-                    fclose(fp);
+                    CloseHandle(hFile);
                     return FALSE;
                 }
 
-                BYTE* rawBmp = (BYTE*)malloc(steps[i].imageSize);
+                BYTE* rawBmp = (BYTE*)HeapAlloc(GetProcessHeap(), 0, steps[i].imageSize);
                 if (!rawBmp) {
                     ttp_free_project(steps, bmpBuffers, bmpSizes, count);
-                    fclose(fp);
+                    CloseHandle(hFile);
                     return FALSE;
                 }
 
-                if (fread(rawBmp, 1, steps[i].imageSize, fp) != steps[i].imageSize) {
-                    free(rawBmp);
+                if (!ReadFile(hFile, rawBmp, steps[i].imageSize, &dwRead, NULL) || dwRead != steps[i].imageSize) {
+                    if (rawBmp) {
+                        HeapFree(GetProcessHeap(), 0, rawBmp);
+                    }
                     ttp_free_project(steps, bmpBuffers, bmpSizes, count);
-                    fclose(fp);
+                    CloseHandle(hFile);
                     return FALSE;
                 }
 
@@ -274,7 +303,9 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
                 DWORD promotedSize = 0;
                 BYTE* promotedBmp = convert_24bpp_to_32bpp(rawBmp, steps[i].imageSize, &promotedSize);
                 if (promotedBmp) {
-                    free(rawBmp);
+                    if (rawBmp) {
+                        HeapFree(GetProcessHeap(), 0, rawBmp);
+                    }
                     bmpBuffers[i] = promotedBmp;
                     bmpSizes[i] = promotedSize;
                     steps[i].imageSize = promotedSize;
@@ -289,7 +320,7 @@ BOOL ttp_load_project(const char* filepath, TTPStep** outSteps, DWORD* outStepCo
         }
     }
 
-    fclose(fp);
+    CloseHandle(hFile);
 
     *outSteps = steps;
     *outStepCount = count;
@@ -303,16 +334,16 @@ void ttp_free_project(TTPStep* steps, BYTE** bmpBuffers, DWORD* bmpSizes, DWORD 
     if (bmpBuffers) {
         for (DWORD i = 0; i < stepCount; i++) {
             if (bmpBuffers[i]) {
-                free(bmpBuffers[i]);
+                HeapFree(GetProcessHeap(), 0, bmpBuffers[i]);
                 bmpBuffers[i] = NULL;
             }
         }
-        free(bmpBuffers);
+        HeapFree(GetProcessHeap(), 0, bmpBuffers);
     }
     if (bmpSizes) {
-        free(bmpSizes);
+        HeapFree(GetProcessHeap(), 0, bmpSizes);
     }
     if (steps) {
-        free(steps);
+        HeapFree(GetProcessHeap(), 0, steps);
     }
 }
