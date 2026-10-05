@@ -718,7 +718,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
     BitBlt(hdcMem, 0, 0, cropW, cropH, hdc, L, T, SRCCOPY);
     GdiFlush();
 
-    int rowStride = ((cropW * 3 + 3) / 4) * 4;
+    int rowStride = cropW * 4;
     DWORD imgSize = (DWORD)rowStride * cropH;
     DWORD totalBmpSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
 
@@ -742,7 +742,7 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
     bmih->biWidth = cropW;
     bmih->biHeight = cropH; /* Standard bottom-up */
     bmih->biPlanes = 1;
-    bmih->biBitCount = 24;
+    bmih->biBitCount = 32;
     bmih->biCompression = BI_RGB;
     bmih->biSizeImage = imgSize;
 
@@ -753,10 +753,21 @@ BOOL ttp_crop_rect_bmp(HDC hdcSrc, const RECT* cropRect, BYTE** outBmp, DWORD* o
         BYTE* dstRow = dstData + y * rowStride;
         for (int x = 0; x < cropW; x++) {
             const BYTE* px = srcPix + (srcY * cropW + x) * 4;
-            dstRow[x * 3 + 0] = px[0]; /* B */
-            dstRow[x * 3 + 1] = px[1]; /* G */
-            dstRow[x * 3 + 2] = px[2]; /* R */
+            dstRow[x * 4 + 0] = px[0]; /* B */
+            dstRow[x * 4 + 1] = px[1]; /* G */
+            dstRow[x * 4 + 2] = px[2]; /* R */
+            dstRow[x * 4 + 3] = 255;   /* Default foreground */
         }
+    }
+
+    BYTE* mask = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (size_t)cropW * cropH);
+    if (mask) {
+        if (ttp_chromakey_mask(dstData, cropW, cropH, 4, 25, mask)) {
+            for (int i = 0; i < cropW * cropH; i++) {
+                dstData[i * 4 + 3] = mask[i] ? 255 : 0;
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, mask);
     }
 
     *outBmp = bmpBuf;
@@ -1113,6 +1124,7 @@ static BOOL match_gray_buffer_masked_ncc(
         step = 2;
     }
 
+    BOOL skipProbeSAD = ((long long)maxX * (long long)maxY <= 2500LL);
     int maxAllowedSad = numProbes * 60;
 
     typedef struct {
@@ -1125,18 +1137,20 @@ static BOOL match_gray_buffer_masked_ncc(
 
     for (int y = 0; y <= maxY; y += step) {
         for (int x = 0; x <= maxX; x += step) {
-            /* Tier 1: Probe SAD coarse filtering */
-            int sadSum = 0;
-            BOOL passedProbe = TRUE;
-            for (int k = 0; k < numProbes; k++) {
-                int scrVal = grayBuf[(y + probes[k].dy) * imgW + (x + probes[k].dx)];
-                sadSum += __builtin_abs(scrVal - (int)probes[k].val);
-                if (sadSum > maxAllowedSad) {
-                    passedProbe = FALSE;
-                    break;
+            /* Tier 1: Probe SAD coarse filtering (bypassed for localized small ROI searches) */
+            if (!skipProbeSAD) {
+                int sadSum = 0;
+                BOOL passedProbe = TRUE;
+                for (int k = 0; k < numProbes; k++) {
+                    int scrVal = grayBuf[(y + probes[k].dy) * imgW + (x + probes[k].dx)];
+                    sadSum += __builtin_abs(scrVal - (int)probes[k].val);
+                    if (sadSum > maxAllowedSad) {
+                        passedProbe = FALSE;
+                        break;
+                    }
                 }
+                if (!passedProbe) continue;
             }
-            if (!passedProbe) continue;
 
             /* Tier 2: Masked NCC */
             double sumI = 0.0;
