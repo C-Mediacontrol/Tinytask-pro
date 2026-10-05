@@ -509,6 +509,16 @@ void ttp_engine_set_screen_dc_override(HDC hdcOverride) {
     s_hdcScreenOverride = hdcOverride;
 }
 
+static inline int score_to_int(double s) {
+    return (int)s;
+}
+
+static inline int score_to_frac(double s) {
+    double d = (s >= 0.0) ? s : -s;
+    int frac = (int)((d - (int)d) * 10000.0 + 0.5);
+    return (frac >= 10000) ? 9999 : frac;
+}
+
 void ttp_diag_log(const char* fmt, ...) {
     char msgBuf[512];
     va_list args;
@@ -593,26 +603,11 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 ttp_diag_log("  [TEXT] OrigPt (%ld, %ld) Accessible: \"%s\" (hit=%d)",
                     origPt.x, origPt.y, accName, accHit);
                 if (accHit && ttp_strstr(accName, step->textKey)) {
-                    BOOL verified = TRUE;
-                    if (bmpData && bmpSize > 0) {
-                        HDC hdcScr = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
-                        POINT roiPt = origPt;
-                        double roiScore = 0.0;
-                        BOOL roiOk = ttp_match_template_ncc_roi(hdcScr, origPt.x, origPt.y, 80, bmpData, bmpSize, 0.60, &roiPt, &roiScore);
-                        if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScr);
-                        ttp_diag_log("  [TEXT_FAST_CHECK_VALIDATE] OrigPt (%ld, %ld): roiOk=%d, score=%.4f",
-                            origPt.x, origPt.y, roiOk, roiScore);
-                        if (!roiOk) {
-                            verified = FALSE;
-                        }
-                    }
-                    if (verified) {
-                        targetX = step->origX;
-                        targetY = step->origY;
-                        targetFound = TRUE;
-                        ttp_diag_log("  [TEXT] Fast-check MATCHED at orig! target=(%ld, %ld)", targetX, targetY);
-                        break;
-                    }
+                    targetX = step->origX;
+                    targetY = step->origY;
+                    targetFound = TRUE;
+                    ttp_diag_log("  [TEXT] Fast-check MATCHED at orig! target=(%ld, %ld)", targetX, targetY);
+                    break;
                 }
 
                 POINT candidates[64];
@@ -641,8 +636,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                             BOOL roiOk = ttp_match_template_ncc_roi(hdcScr, candPt.x, candPt.y, 80, bmpData, bmpSize, 0.60, &roiPt, &roiScore);
                             if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScr);
 
-                            ttp_diag_log("  [TEXT_CROSS_VALIDATE] Candidate %d at (%ld, %ld): roiOk=%d, score=%.4f",
-                                best, candPt.x, candPt.y, roiOk, roiScore);
+                            ttp_diag_log("  [TEXT_CROSS_VALIDATE] Candidate %d at (%ld, %ld): roiOk=%d, score=%d.%04d",
+                                best, candPt.x, candPt.y, roiOk, score_to_int(roiScore), score_to_frac(roiScore));
 
                             if (!roiOk) {
                                 verified = FALSE;
@@ -674,14 +669,14 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
                 BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.70, &matchPos, &score);
-                ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
-                    matched, score, matchPos.x, matchPos.y);
+                ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+                    matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
                     matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.70, &matchPos, &score);
-                    ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
-                        matched, score, matchPos.x, matchPos.y);
+                    ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+                        matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
                 }
 
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
@@ -734,14 +729,14 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
                 POINT matchPos = { step->origX, step->origY };
                 double score = 0.0;
                 BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
-                ttp_diag_log("  [IMAGE] Tier 1 ROI: matched=%d, score=%.4f, pos=(%ld, %ld)",
-                    matched, score, matchPos.x, matchPos.y);
+                ttp_diag_log("  [IMAGE] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+                    matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
 
                 // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
                 if (!matched) {
                     matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
-                    ttp_diag_log("  [IMAGE] Tier 2 Full: matched=%d, score=%.4f, pos=(%ld, %ld)",
-                        matched, score, matchPos.x, matchPos.y);
+                    ttp_diag_log("  [IMAGE] Tier 2 Full: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+                        matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
                 }
 
                 if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
