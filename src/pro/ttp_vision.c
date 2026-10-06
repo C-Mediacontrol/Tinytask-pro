@@ -1083,8 +1083,10 @@ static BOOL match_gray_buffer_masked_ncc(
         }
     }
 
+    BOOL isMaskedTemplate = (Nm >= 16 && Nm < N);
+
     /* Fall back to standard unmasked template if foreground is too small or covers whole pattern */
-    if (Nm < 16 || Nm == N) {
+    if (!isMaskedTemplate) {
         __builtin_memset(tMask, 1, N);
         Nm = N;
         sumT = 0.0;
@@ -1111,14 +1113,20 @@ static BOOL match_gray_buffer_masked_ncc(
         }
     }
 
+    double varPerPixelT = sigmaT2 / (double)Nm;
+    BOOL isFlatVector = isMaskedTemplate && (varPerPixelT < 2.0);
+
     if (sigmaT2 < 1e-6) {
-        if (dynTemplate) {
-            if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
-            if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
-            if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
+        if (!isFlatVector || Nm < 4) {
+            if (dynTemplate) {
+                if (tGray) { HeapFree(GetProcessHeap(), 0, tGray); }
+                if (tMask) { HeapFree(GetProcessHeap(), 0, tMask); }
+                if (mPixels) { HeapFree(GetProcessHeap(), 0, mPixels); }
+            }
+            if (outBestScore) *outBestScore = 0.0;
+            return FALSE;
         }
-        if (outBestScore) *outBestScore = 0.0;
-        return FALSE;
+        sigmaT2 = 1.0; /* Use artificial variance for flat vector matcher */
     }
 
     TTPProbePoint probes[16];
@@ -1183,12 +1191,29 @@ static BOOL match_gray_buffer_masked_ncc(
             }
 
             double varI = sumI2 - (sumI * sumI) / (double)Nm;
-            if (varI <= 25.0) continue;
+            if (varI <= 25.0) {
+                if (isFlatVector) {
+                    double muI = sumI / (double)Nm;
+                    double diff = (muT > muI) ? (muT - muI) : (muI - muT);
+                    if (diff <= 15.0) {
+                        double flatScore = 1.0 - (diff / 60.0);
+                        if (flatScore > bestScore) {
+                            bestScore = flatScore;
+                            bestX = x;
+                            bestY = y;
+                        }
+                    }
+                }
+                continue;
+            }
 
             double denom = ttp_sqrt(sigmaT2 * varI);
             if (denom < 1e-9) continue;
 
             double score = cov / denom;
+            if (isFlatVector && score > 0.40) {
+                score = 0.40;
+            }
             if (score > 1.0) score = 1.0;
 
             if (score > bestScore) {
@@ -1265,12 +1290,29 @@ static BOOL match_gray_buffer_masked_ncc(
                     }
 
                     double varI = sumI2 - (sumI * sumI) / (double)Nm;
-                    if (varI <= 25.0) continue;
+                    if (varI <= 25.0) {
+                        if (isFlatVector) {
+                            double muI = sumI / (double)Nm;
+                            double diff = (muT > muI) ? (muT - muI) : (muI - muT);
+                            if (diff <= 15.0) {
+                                double flatScore = 1.0 - (diff / 60.0);
+                                if (flatScore > bestScore) {
+                                    bestScore = flatScore;
+                                    bestX = x;
+                                    bestY = y;
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
                     double denom = ttp_sqrt(sigmaT2 * varI);
                     if (denom < 1e-9) continue;
 
                     double score = cov / denom;
+                    if (isFlatVector && score > 0.40) {
+                        score = 0.40;
+                    }
                     if (score > 1.0) score = 1.0;
 
                     if (score > bestScore) {
@@ -1643,7 +1685,8 @@ static void check_desktop_icons_accessible(const char* targetText, TextSearchCon
 
     CoInitialize(NULL);
     IAccessible* pAcc = NULL;
-    if (SUCCEEDED(AccessibleObjectFromWindow(hLV, OBJID_CLIENT, &IID_IAccessible, (void**)&pAcc)) && pAcc) {
+    static const IID s_IID_IAccessible = { 0x618736e0, 0x3c3d, 0x11cf, { 0x81, 0x0c, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+    if (SUCCEEDED(AccessibleObjectFromWindow(hLV, OBJID_CLIENT, &s_IID_IAccessible, (void**)&pAcc)) && pAcc) {
         long childCount = 0;
         if (SUCCEEDED(pAcc->lpVtbl->get_accChildCount(pAcc, &childCount)) && childCount > 0) {
             VARIANT* pChildren = (VARIANT*)HeapAlloc(GetProcessHeap(), 0, sizeof(VARIANT) * childCount);

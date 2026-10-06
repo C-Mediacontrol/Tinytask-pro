@@ -40,6 +40,50 @@ static BYTE* create_test_pattern_bmp(int w, int h, DWORD* outSize) {
     return buf;
 }
 
+/* Helper: Create a 32bpp masked BMP with pure color vector squares (similar to Windows Start button) */
+static BYTE* create_flat_vector_masked_bmp(int w, int h, DWORD* outSize) {
+    int rowStride = w * 4;
+    DWORD imgSize = rowStride * h;
+    DWORD totalSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imgSize;
+    BYTE* buf = (BYTE*)calloc(1, totalSize);
+    BITMAPFILEHEADER* bfh = (BITMAPFILEHEADER*)buf;
+    bfh->bfType = 0x4D42;
+    bfh->bfSize = totalSize;
+    bfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    BITMAPINFOHEADER* bih = (BITMAPINFOHEADER*)(buf + sizeof(BITMAPFILEHEADER));
+    bih->biSize = sizeof(BITMAPINFOHEADER);
+    bih->biWidth = w;
+    bih->biHeight = -h; /* Top-down BMP */
+    bih->biPlanes = 1;
+    bih->biBitCount = 32;
+    bih->biSizeImage = imgSize;
+
+    BYTE* px = buf + bfh->bfOffBits;
+    for (int y = 0; y < h; y++) {
+        BYTE* row = px + y * rowStride;
+        for (int x = 0; x < w; x++) {
+            int inSquare1 = (x >= 8 && x < 18 && y >= 8 && y < 18);
+            int inSquare2 = (x >= 22 && x < 32 && y >= 8 && y < 18);
+            int inSquare3 = (x >= 8 && x < 18 && y >= 22 && y < 32);
+            int inSquare4 = (x >= 22 && x < 32 && y >= 22 && y < 32);
+
+            if (inSquare1 || inSquare2 || inSquare3 || inSquare4) {
+                row[x * 4 + 0] = 212; // B
+                row[x * 4 + 1] = 120; // G
+                row[x * 4 + 2] = 0;   // R
+                row[x * 4 + 3] = 255; // A (Foreground)
+            } else {
+                row[x * 4 + 0] = 190;
+                row[x * 4 + 1] = 190;
+                row[x * 4 + 2] = 190;
+                row[x * 4 + 3] = 0;   // A (Background masked)
+            }
+        }
+    }
+    *outSize = totalSize;
+    return buf;
+}
+
 /* Mock timeout callback that records if timeout dialog was triggered */
 static int s_timeoutTriggered = 0;
 static int mock_timeout_cb(const TTPStep* step, void* userData) {
@@ -1047,9 +1091,116 @@ int main() {
         fflush(stdout);
     }
 
+    // ==========================================================
+    // Phase 6 Flat Vector Masked Matching & Anchor-First Probe (Test 17)
+    // ==========================================================
+    {
+        printf("\n[TEST 17/17] Running Test 17: Flat Vector Masked Matching & Anchor-First Probe...\n");
+        fflush(stdout);
+
+        /* 17A: Source Code Invariants in ttp_engine.c & ttp_vision.c */
+        FILE* fpEng = fopen_dual("src/ttp_engine.c", "reverse-gemini/src/pro/ttp_engine.c");
+        assert(fpEng != NULL);
+        fseek(fpEng, 0, SEEK_END);
+        long engSz = ftell(fpEng);
+        fseek(fpEng, 0, SEEK_SET);
+        char* engSrc = (char*)malloc(engSz + 1);
+        fread(engSrc, 1, engSz, fpEng);
+        engSrc[engSz] = '\0';
+        fclose(fpEng);
+
+        const char* pAnchorProbe = strstr(engSrc, "Plan A Hover Probe (OrigPt)");
+        printf("Test 17A (Engine Invariant: Anchor-First Probe): pAnchorProbe=%p\n", pAnchorProbe);
+        fflush(stdout);
+        free(engSrc);
+        assert(pAnchorProbe != NULL); // FAILS RED before engine update!
+
+        FILE* fpVis = fopen_dual("src/ttp_vision.c", "reverse-gemini/src/pro/ttp_vision.c");
+        assert(fpVis != NULL);
+        fseek(fpVis, 0, SEEK_END);
+        long visSz = ftell(fpVis);
+        fseek(fpVis, 0, SEEK_SET);
+        char* visSrc = (char*)malloc(visSz + 1);
+        fread(visSrc, 1, visSz, fpVis);
+        visSrc[visSz] = '\0';
+        fclose(fpVis);
+
+        const char* pFlatVector = strstr(visSrc, "isFlatVector");
+        printf("Test 17A (Vision Invariant: Flat Vector Guard): pFlatVector=%p\n", pFlatVector);
+        fflush(stdout);
+        free(visSrc);
+        assert(pFlatVector != NULL); // FAILS RED before vision update!
+
+        printf("Test 17A invariants passed!\n");
+        fflush(stdout);
+
+        /* 17B: Behavioral Verification of Flat Vector Masked Matching & Noise Suppression */
+        int vecW = 40, vecH = 40;
+        DWORD vecBmpSize = 0;
+        BYTE* vecBmp = create_flat_vector_masked_bmp(vecW, vecH, &vecBmpSize);
+
+        int canvasW = 500, canvasH = 300;
+        HDC hdcScr17 = GetDC(NULL);
+        HDC hdcMem17 = CreateCompatibleDC(hdcScr17);
+        HBITMAP hBmp17 = CreateCompatibleBitmap(hdcScr17, canvasW, canvasH);
+        SelectObject(hdcMem17, hBmp17);
+
+        // Fill background with light gray (RGB 190, 190, 190)
+        RECT rcBg17 = { 0, 0, canvasW, canvasH };
+        HBRUSH hbrBg17 = CreateSolidBrush(RGB(190, 190, 190));
+        FillRect(hdcMem17, &rcBg17, hbrBg17);
+        DeleteObject(hbrBg17);
+
+        // Draw exact hovered button at (100, 100)
+        for (int y = 0; y < vecH; y++) {
+            for (int x = 0; x < vecW; x++) {
+                int inSq = ((x >= 8 && x < 18) || (x >= 22 && x < 32)) &&
+                           ((y >= 8 && y < 18) || (y >= 22 && y < 32));
+                if (inSq) {
+                    SetPixel(hdcMem17, 100 + x, 100 + y, RGB(0, 120, 212));
+                }
+            }
+        }
+
+        // Add random/noisy texture at (300, 100)
+        for (int y = 0; y < vecH; y++) {
+            for (int x = 0; x < vecW; x++) {
+                BYTE v = (BYTE)(80 + ((x * 17 + y * 23) % 90));
+                SetPixel(hdcMem17, 300 + x, 100 + y, RGB(v, v, v));
+            }
+        }
+
+        // Test matching against the hovered target
+        POINT matchPt = { 0, 0 };
+        double matchScore = 0.0;
+        BOOL bMatched = ttp_match_template_masked_ncc(hdcMem17, canvasW, canvasH, vecBmp, vecBmpSize, 0.70, &matchPt, &matchScore);
+        printf("Test 17B (Hovered Target Matched): bMatched=%d, score=%d.%04d, pos=(%ld, %ld)\n",
+               bMatched, (int)matchScore, (int)((matchScore - (int)matchScore) * 10000), matchPt.x, matchPt.y);
+        fflush(stdout);
+        assert(bMatched == TRUE);
+        assert(matchPt.x == 100 + vecW / 2 && matchPt.y == 100 + vecH / 2);
+
+        // Test noise suppression: test ROI around the noisy area (300, 100)
+        POINT noisePt = { 300, 100 };
+        double noiseScore = 0.0;
+        ttp_match_template_ncc_roi(hdcMem17, 300, 100, 60, vecBmp, vecBmpSize, 0.45, &noisePt, &noiseScore);
+        printf("Test 17B (Noise Suppression): noiseScore=%d.%04d (must be <= 0.40)\n",
+               (int)noiseScore, (int)((noiseScore - (int)noiseScore) * 10000));
+        fflush(stdout);
+        assert(noiseScore <= 0.40);
+
+        DeleteObject(hBmp17);
+        DeleteDC(hdcMem17);
+        ReleaseDC(NULL, hdcScr17);
+        free(vecBmp);
+        printf("Test 17B passed!\n");
+        fflush(stdout);
+    }
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");
     return 0;
 }
+
 

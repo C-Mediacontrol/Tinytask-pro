@@ -606,36 +606,51 @@ static BOOL ttp_match_visual_target_adaptive(const TTPStep* step, const BYTE* bm
     ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
         matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
 
-    // Plan A + Plan D: If score is in marginal range (0.45 <= score < baseMinScore), trigger Speculative Pre-Hover Probe & Spatial Adaptive Gate
-    if (!matched && score >= 0.45) {
-        int dx = (int)(matchPos.x - step->origX);
-        int dy = (int)(matchPos.y - step->origY);
-        int distSq = dx * dx + dy * dy;
+    // Plan D Spatial Gate: If strictly in near-origin neighborhood (dist <= 20px, distSq <= 400) and score >= 0.55, directly accept
+    int dx = (int)(matchPos.x - step->origX);
+    int dy = (int)(matchPos.y - step->origY);
+    int distSq = dx * dx + dy * dy;
 
-        // Plan D Spatial Gate: If strictly in near-origin neighborhood (dist <= 20px, distSq <= 400) and score >= 0.55, directly accept
-        if (distSq <= 400 && score >= 0.55) {
+    if (!matched && distSq <= 400 && score >= 0.55) {
+        matched = TRUE;
+        ttp_diag_log("  [VISUAL] Plan D Spatial Gate: Near-origin (%d px) score=%d.%04d accepted!",
+            (int)ttp_isqrt((unsigned long long)distSq), score_to_int(score), score_to_frac(score));
+    }
+
+    // Plan A Speculative Pre-Hover Probe (Anchor-First Probe):
+    // In real environment (!s_hdcScreenOverride), if not matched yet, first probe recorded origPt
+    if (!matched && !s_hdcScreenOverride) {
+        SetCursorPos(step->origX, step->origY);
+        Sleep(35); // Allow host UI thread to paint hover highlight
+
+        // Re-capture and re-test ROI around recorded origPt
+        ReleaseDC(NULL, hdcScreen);
+        hdcScreen = GetDC(NULL);
+
+        POINT hoverMatchPos = { step->origX, step->origY };
+        double hoverScore = 0.0;
+        BOOL hoverMatched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 80, bmpData, bmpSize, 0.60, &hoverMatchPos, &hoverScore);
+        ttp_diag_log("  [VISUAL] Plan A Hover Probe (OrigPt): hoverMatched=%d, hoverScore=%d.%04d at (%ld, %ld)",
+            hoverMatched, score_to_int(hoverScore), score_to_frac(hoverScore), hoverMatchPos.x, hoverMatchPos.y);
+
+        if (hoverMatched || hoverScore >= 0.60) {
             matched = TRUE;
-            ttp_diag_log("  [VISUAL] Plan D Spatial Gate: Near-origin (%d px) score=%d.%04d accepted!",
-                (int)ttp_isqrt((unsigned long long)distSq), score_to_int(score), score_to_frac(score));
-        } else if (!s_hdcScreenOverride && distSq <= 22500) { // within 150px
-            // Plan A Hover Probe: Move cursor to candidate position to trigger Hover state in host application
+            matchPos = hoverMatchPos;
+        } else if (score >= 0.60 && distSq <= 22500 && distSq > 400) {
+            // Secondary probe: if origPt failed, probe candidate if it has high confidence (score >= 0.60)
             SetCursorPos(matchPos.x, matchPos.y);
-            Sleep(35); // Allow host UI thread to paint hover highlight
+            Sleep(35);
 
-            // Re-capture and re-test ROI
             ReleaseDC(NULL, hdcScreen);
             hdcScreen = GetDC(NULL);
 
-            POINT hoverMatchPos = matchPos;
-            double hoverScore = 0.0;
-            BOOL hoverMatched = ttp_match_template_ncc_roi(hdcScreen, matchPos.x, matchPos.y, 80, bmpData, bmpSize, 0.65, &hoverMatchPos, &hoverScore);
-            ttp_diag_log("  [VISUAL] Plan A Hover Probe: hoverMatched=%d, hoverScore=%d.%04d at (%ld, %ld)",
+            hoverMatchPos = matchPos;
+            hoverScore = 0.0;
+            hoverMatched = ttp_match_template_ncc_roi(hdcScreen, matchPos.x, matchPos.y, 80, bmpData, bmpSize, 0.65, &hoverMatchPos, &hoverScore);
+            ttp_diag_log("  [VISUAL] Plan A Hover Probe (Candidate): hoverMatched=%d, hoverScore=%d.%04d at (%ld, %ld)",
                 hoverMatched, score_to_int(hoverScore), score_to_frac(hoverScore), hoverMatchPos.x, hoverMatchPos.y);
 
             if (hoverMatched || hoverScore >= 0.65) {
-                matched = TRUE;
-                matchPos = hoverMatchPos;
-            } else if (distSq <= 400 && hoverScore >= 0.55) { // Plan D fallback after hover probe
                 matched = TRUE;
                 matchPos = hoverMatchPos;
             }
@@ -890,8 +905,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         for (int i = 1; i <= steps; i++) {
             LONG cx = startX + (endX - startX) * i / steps;
             LONG cy = startY + (endY - startY) * i / steps;
-            DWORD acx = (DWORD)((cx * 65535ULL) / (scrW > 1 ? scrW - 1 : 1));
-            DWORD acy = (DWORD)((cy * 65535ULL) / (scrH > 1 ? scrH - 1 : 1));
+            DWORD acx = (DWORD)(((DWORD)cx * 65535) / (DWORD)(scrW > 1 ? scrW - 1 : 1));
+            DWORD acy = (DWORD)(((DWORD)cy * 65535) / (DWORD)(scrH > 1 ? scrH - 1 : 1));
             mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, acx, acy, 0, 0);
             SetCursorPos(cx, cy);
             Sleep(10);
