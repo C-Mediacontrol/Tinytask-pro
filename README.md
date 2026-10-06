@@ -181,9 +181,11 @@ TinyTask Pro 摒弃了将宏脚本与图片零散存放在文件夹中的脆弱�
 * 兼容性：100% 自动识别加载 v1 格式（172 字节 Step，`chromaTol` 缺省置 0），并向下完全兼容经典 TinyTask `.rec` 坐标文件。
 
 ### 配套 Python 工具与一键拖拽脚本
+项目在 `src/` 与 `bin/` 中提供了开箱即用的工程逆向检查与解包工具：
 项目在 `src/pro/` 与 `bin/` 中提供了开箱即用的工程逆向检查与解包工具：
 * **命令行解包**：
   ```bash
+  python reverse-gemini/src/tinytask_tool.py unpack "path/to/macro.ttp"
   python reverse-gemini/src/pro/tinytask_tool.py unpack "path/to/macro.ttp"
   ```
   自动在同目录下生成 `_unpacked/` 文件夹，提取全部步骤的 `.bmp` 图片与 `manifest.json` 结构清单。
@@ -258,7 +260,7 @@ rm reverse-gemini/src/pro/tinytask_pro_res.o
 ```
 输出文件：[`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe)（**77,312 字节 / 75.5 KB，0 CRT 依赖**）。
 
-### 运行全套 8 大单元与回归测试套件 (47+ 项全绿)：
+### 运行全套 8 大单元与回归测试套件 (48+ 项全绿)：
 ```bash
 # 1. 存储层序列化往返与 32bpp BGRA 向下兼容测试 (7 项)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_storage.c reverse-gemini/src/pro/ttp_storage.c -o test_storage.exe && ./test_storage.exe
@@ -281,7 +283,7 @@ gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_
 # 7. 6 列抽屉、微调模态框与 60FPS 棋盘格集成测试 (7 项)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
 
-# 8. 级联检索、双引擎与极端场景全量回归基准测试 (14 项)
+# 8. 级联检索、双引擎与极端场景全量回归基准测试 (15 项)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
 ```
 
@@ -410,6 +412,7 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 * **`.ttp v2` Binary Packaging**: Encapsulates metadata header `TTPHeader` (version 2), step descriptors with `chromaTol`, and 32-bit BGRA DIB/BMP visual assets with Alpha transparency channel. Fully backward-compatible with v1 and `.rec` files.
 * **Python Tooling (`tinytask_tool.py`)**:
   ```bash
+  python reverse-gemini/src/tinytask_tool.py unpack "path/to/macro.ttp"
   python reverse-gemini/src/pro/tinytask_tool.py unpack "path/to/macro.ttp"
   ```
   Extracts all step images and outputs `manifest.json`.
@@ -422,6 +425,7 @@ Double-clicking SubItem 4 (`On Timeout`) displays an in-place native Win32 conte
 
 | Feature | TinyTask 1.77 | TinyTask Pro | Heavyweight RPA (Power Automate, UiPath) |
 |---|---|---|---|
+| **Binary Footprint** | ~35 KB | **~92 KB (Standalone)** | 500 MB ~ 2 GB Runtime |
 | **Binary Footprint** | ~35 KB | **~69 KB (x86) / ~75 KB (x64)** | 500 MB ~ 2 GB Runtime |
 | **External Dependencies**| None (Win32) | **None (Native Win32, 0 `<math.h>`/`-lm`)** | .NET / Python / Node / Chromium |
 | **Element Locating** | Fixed Physical $(X,Y)$ | **Masked Cascaded Vision + Accessibility** | Selectors / DOM / Cloud OCR |
@@ -480,7 +484,7 @@ rm reverse-gemini/src/pro/tinytask_pro_res.o
 ```
 Resulting binary: [`reverse-gemini/bin/tinytask_pro.exe`](file:///e:/reverse-gemini/reverse-gemini/bin/tinytask_pro.exe) (**75.5 KB, 77,312 bytes**, with **0 CRT DLL dependencies**).
 
-### Run Test Suites (47+ Tests Passing):
+### Run Test Suites (48+ Tests Passing):
 ```bash
 # 1. Storage roundtrip & 32bpp backward compatibility (7 tests)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_storage.c reverse-gemini/src/pro/ttp_storage.c -o test_storage.exe && ./test_storage.exe
@@ -503,7 +507,7 @@ gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_
 # 7. 6-column drawer, modal step editor & 60FPS checkerboard (7 tests)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_tinytask_pro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lcomctl32 -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -lcomdlg32 -lshell32 -o test_tinytask_pro.exe && ./test_tinytask_pro.exe
 
-# 8. Cascaded visual recovery & boundary regression scenarios (14 tests)
+# 8. Cascaded visual recovery & boundary regression scenarios (15 tests)
 gcc -Os -Ireverse-gemini/src -Ireverse-gemini/src/pro reverse-gemini/tests/test_fix_repro.c reverse-gemini/src/pro/ttp_storage.c reverse-gemini/src/pro/ttp_vision.c reverse-gemini/src/pro/ttp_engine.c -lole32 -loleaut32 -loleacc -lgdi32 -luser32 -o test_fix_repro.exe && ./test_fix_repro.exe
 ```
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0] - 2026-10-06
+
+### Fixed
+- **桌面图标右键模态菜单卡死与栈越界崩溃修复 (0xC0000005)**:
+  - **堆化自适应边界工作缓冲 (消除栈保护页踩空)**: `ttp_vision.c` 中的 `ttp_adaptive_crop_button` 将原先在局部栈上声明的 4 个 64KB 大数组（`gray`, `edge`, `dilated`, `closed`，合计 256KB）全面改造为单次 `HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 256 * 256 * 4)` 堆分配，并在全部退出分支集中释放。彻底根治了 `-mno-stack-arg-probe` 缺少栈探测探针时越过 4KB Guard Page 触发的 `0xC0000005` Access Violation 致命异常。
+  - **系统模态菜单短路防护 (消除 ~0.5s 卡死)**: 在 `RecTimerProc` 中增加系统模态菜单窗口探测（`#32768`）。当检测到右键点击或指针位于上下文菜单上时，旁路耗时且阻塞的跨进程 COM `AccessibleObjectFromPoint` RPC 查询与视觉裁切，直接录制纯物理坐标与按键动作，消除 Windows Explorer 模态循环引起的 ~0.5s 界面假死。
+  - **回归与健壮性验证**: 增加包含 256KB 堆隔离与 `#32768` 模态短路保护在内的第 15 项专项回归测试，全套 8 大测试套件（48+ 项）全绿通过，保持 0 CRT 纯原生 Win32 依赖与 $\le 78\text{ KB}$ (x64: 75.5 KB) 极致体积门禁。
+
 ## [1.5.0] - 2026-10-06
 
 ### Fixed

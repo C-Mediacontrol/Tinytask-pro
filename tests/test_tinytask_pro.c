@@ -12,7 +12,7 @@
 
 /* Define TTP_TEST_MODE to include tinytask_pro without its WinMain */
 #define TTP_TEST_MODE 1
-#include "../src/tinytask_pro.c"
+#include "../src/pro/tinytask_pro.c"
 
 /* -------------------------------------------------------------------------
  * Test 1: Step array lifecycle (Add, MoveUp, MoveDown, Delete, Renumber)

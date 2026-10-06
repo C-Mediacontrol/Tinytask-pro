@@ -281,8 +281,22 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     }
     GdiFlush();
 
-    /* 1. Compute grayscale luminance & verify texture variance */
-    BYTE gray[256][256];
+    /* 1. Compute grayscale luminance & verify texture variance
+     * Note: Allocate 256KB working buffer on process heap to eliminate stack guard-page breach under -mno-stack-arg-probe */
+    BYTE* workBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)(ROI_SIZE * ROI_SIZE * 4));
+    if (!workBuf) {
+        SelectObject(hdcMem, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        if (releaseDC) ReleaseDC(NULL, hdc);
+        return FALSE;
+    }
+
+    BYTE (*gray)[256]    = (BYTE (*)[256])(workBuf);
+    BYTE (*edge)[256]    = (BYTE (*)[256])(workBuf + ROI_SIZE * ROI_SIZE * 1);
+    BYTE (*dilated)[256] = (BYTE (*)[256])(workBuf + ROI_SIZE * ROI_SIZE * 2);
+    BYTE (*closed)[256]  = (BYTE (*)[256])(workBuf + ROI_SIZE * ROI_SIZE * 3);
+
     const BYTE* srcPix = (const BYTE*)pBits;
     double sumG = 0.0, sumSqG = 0.0;
     int nG = ROI_SIZE * ROI_SIZE;
@@ -306,6 +320,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     double varG = (sumSqG - (sumG * sumG) / nG) / nG;
     if (varG <= 1.0) {
         /* Flat uniform surface (pure white/black/solid color) without features */
+        HeapFree(GetProcessHeap(), 0, workBuf);
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
         DeleteDC(hdcMem);
@@ -319,6 +334,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
 
     int* gradM = (int*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)(ROI_SIZE * ROI_SIZE) * sizeof(int));
     if (!gradM) {
+        HeapFree(GetProcessHeap(), 0, workBuf);
         SelectObject(hdcMem, hOld);
         DeleteObject(hBmp);
         DeleteDC(hdcMem);
@@ -353,8 +369,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         if (edgeThresh > 70) edgeThresh = 70;
     }
 
-    BYTE edge[256][256];
-    __builtin_memset(edge, 0, sizeof(edge));
+    __builtin_memset(edge, 0, (size_t)(ROI_SIZE * ROI_SIZE));
     for (int y = 1; y < ROI_SIZE - 1; y++) {
         for (int x = 1; x < ROI_SIZE - 1; x++) {
             if (gradM[y * ROI_SIZE + x] >= edgeThresh) {
@@ -366,8 +381,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
     /* 3. UIED Morphological Closing:
      * Dilation (3x3 max filter) followed by Erosion (3x3 min filter).
      * Connects discrete character strokes and fragmented button borders. */
-    BYTE dilated[256][256];
-    __builtin_memset(dilated, 0, sizeof(dilated));
+    __builtin_memset(dilated, 0, (size_t)(ROI_SIZE * ROI_SIZE));
     for (int y = 1; y < ROI_SIZE - 1; y++) {
         for (int x = 1; x < ROI_SIZE - 1; x++) {
             BYTE v = 0;
@@ -381,8 +395,7 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
         }
     }
 
-    BYTE closed[256][256];
-    __builtin_memset(closed, 0, sizeof(closed));
+    __builtin_memset(closed, 0, (size_t)(ROI_SIZE * ROI_SIZE));
     for (int y = 2; y < ROI_SIZE - 2; y++) {
         for (int x = 2; x < ROI_SIZE - 2; x++) {
             BYTE v = 1;
@@ -535,6 +548,10 @@ BOOL ttp_adaptive_crop_button(HDC hdcSrc, LONG clickX, LONG clickY, RECT* outRec
 
     if (gradM) {
         HeapFree(GetProcessHeap(), 0, gradM);
+    }
+    if (workBuf) {
+        HeapFree(GetProcessHeap(), 0, workBuf);
+        workBuf = NULL;
     }
 
     int L = (bestLeft < bestRight) ? bestLeft : bestRight;

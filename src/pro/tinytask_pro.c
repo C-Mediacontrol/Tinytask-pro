@@ -1860,6 +1860,12 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
         return;
     }
 
+    char clsUnder[32] = {0};
+    if (hUnder) {
+        GetClassNameA(hUnder, clsUnder, sizeof(clsUnder));
+    }
+    BOOL isMenuWnd = (lstrcmpA(clsUnder, "#32768") == 0);
+
     if (pt.x != g_LastMousePos.x || pt.y != g_LastMousePos.y) {
         ttp_synth_add_mouse_event(WM_MOUSEMOVE, pt.x, pt.y, now);
         g_LastMousePos = pt;
@@ -1874,35 +1880,43 @@ static void CALLBACK RecTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD 
 
         char accName[128] = {0};
         RECT accRect = {0};
-        BOOL hasAcc = ttp_get_accessible_element_at_point(pt, accName, sizeof(accName), &accRect);
-
+        BOOL hasAcc = FALSE;
         BYTE* bmpBuf = NULL;
         DWORD bmpSize = 0;
         RECT buttonRect = {0};
-        HDC hdcScreen = GetDC(NULL);
 
-        /* Clean Element Crop Priority:
-         * If MSAA gives a compact bounding box (e.g. desktop icon, toolbar button, dialog control),
-         * crop directly to that clean bounding rectangle to avoid capturing unrelated background wallpaper/decorations! */
-        int accW = accRect.right - accRect.left;
-        int accH = accRect.bottom - accRect.top;
-        if (hasAcc && accW >= 16 && accH >= 14 && accW <= 240 && accH <= 105) {
-            ttp_crop_rect_bmp(hdcScreen, &accRect, &bmpBuf, &bmpSize);
-        }
-        if (!bmpBuf) {
-            ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &buttonRect, &bmpBuf, &bmpSize);
-        }
-        ReleaseDC(NULL, hdcScreen);
+        /* Modal Menu Short-Circuit Guard:
+         * If clicking over a Windows popup/context menu (#32768), avoid cross-process COM
+         * AccessibleObjectFromPoint which causes Explorer/Shell modal message pumps to hang for ~0.5s.
+         * Also skip adaptive visual button crop for transient menus to avoid capturing ephemeral pixels. */
+        if (!isMenuWnd) {
+            hasAcc = ttp_get_accessible_element_at_point(pt, accName, sizeof(accName), &accRect);
 
-        /* Power Automate Dual-Locator Rule:
-         * If accName merely matches the root parent window title (e.g. "Calculator", "Untitled - Notepad"),
-         * the element is NOT an accessible leaf control. Clear accName so visual image template is primary anchor! */
-        if (accName[0] != '\0' && hUnder != NULL) {
-            char rootTitle[128] = {0};
-            HWND hRoot = GetAncestor(hUnder, GA_ROOT);
-            if (hRoot && GetWindowTextA(hRoot, rootTitle, sizeof(rootTitle)) > 0) {
-                if (lstrcmpiA(accName, rootTitle) == 0) {
-                    accName[0] = '\0';
+            HDC hdcScreen = GetDC(NULL);
+
+            /* Clean Element Crop Priority:
+             * If MSAA gives a compact bounding box (e.g. desktop icon, toolbar button, dialog control),
+             * crop directly to that clean bounding rectangle to avoid capturing unrelated background wallpaper/decorations! */
+            int accW = accRect.right - accRect.left;
+            int accH = accRect.bottom - accRect.top;
+            if (hasAcc && accW >= 16 && accH >= 14 && accW <= 240 && accH <= 105) {
+                ttp_crop_rect_bmp(hdcScreen, &accRect, &bmpBuf, &bmpSize);
+            }
+            if (!bmpBuf) {
+                ttp_adaptive_crop_button(hdcScreen, pt.x, pt.y, &buttonRect, &bmpBuf, &bmpSize);
+            }
+            ReleaseDC(NULL, hdcScreen);
+
+            /* Power Automate Dual-Locator Rule:
+             * If accName merely matches the root parent window title (e.g. "Calculator", "Untitled - Notepad"),
+             * the element is NOT an accessible leaf control. Clear accName so visual image template is primary anchor! */
+            if (accName[0] != '\0' && hUnder != NULL) {
+                char rootTitle[128] = {0};
+                HWND hRoot = GetAncestor(hUnder, GA_ROOT);
+                if (hRoot && GetWindowTextA(hRoot, rootTitle, sizeof(rootTitle)) > 0) {
+                    if (lstrcmpiA(accName, rootTitle) == 0) {
+                        accName[0] = '\0';
+                    }
                 }
             }
         }

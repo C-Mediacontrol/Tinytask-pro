@@ -53,8 +53,12 @@ static FILE* fopen_dual(const char* p1, const char* p2) {
     if (!f && p2) f = fopen(p2, "rb");
     if (!f && p1 && strncmp(p1, "src/", 4) == 0) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "src/pro/%s", p1 + 4);
+        snprintf(buf, sizeof(buf), "../src/pro/%s", p1 + 4);
         f = fopen(buf, "rb");
+        if (!f) {
+            snprintf(buf, sizeof(buf), "src/pro/%s", p1 + 4);
+            f = fopen(buf, "rb");
+        }
         if (!f) {
             snprintf(buf, sizeof(buf), "reverse-gemini/src/pro/%s", p1 + 4);
             f = fopen(buf, "rb");
@@ -907,8 +911,60 @@ int main() {
         free(bBuf14);
     }
 
+    /* -------------------------------------------------------------------------
+     * Test 15: Zero-CRT Stack Safety & Modal Menu Guard Invariants (BugFix)
+     * ------------------------------------------------------------------------- */
+    {
+        printf("\n[TEST 15/15] Running Test 15: Adaptive Crop Stack Safety & Menu Guard Invariant...\n");
+
+        /* 15A: Check source code invariant in ttp_vision.c:
+         * Under -mno-stack-arg-probe, functions must NOT declare 256KB local stack arrays.
+         * Arrays BYTE gray[256][256], edge[256][256], etc. must be heap allocated. */
+        FILE* fpVis = fopen_dual("src/ttp_vision.c", "reverse-gemini/src/pro/ttp_vision.c");
+        if (!fpVis) fpVis = fopen_dual("src/pro/ttp_vision.c", "reverse-gemini/src/pro/ttp_vision.c");
+        assert(fpVis != NULL);
+        fseek(fpVis, 0, SEEK_END);
+        long visSz = ftell(fpVis);
+        fseek(fpVis, 0, SEEK_SET);
+        char* visSrc = (char*)malloc(visSz + 1);
+        fread(visSrc, 1, visSz, fpVis);
+        visSrc[visSz] = '\0';
+        fclose(fpVis);
+
+        const char* pStackGray = strstr(visSrc, "BYTE gray[256][256];");
+        const char* pStackEdge = strstr(visSrc, "BYTE edge[256][256];");
+        printf("Test 15A (Zero 256KB stack array): pStackGray=%p (must be NULL), pStackEdge=%p (must be NULL)\n",
+               pStackGray, pStackEdge);
+        fflush(stdout);
+        assert(pStackGray == NULL); // Fails RED on current code!
+        assert(pStackEdge == NULL);
+
+        /* 15B: Check tinytask_pro.c for #32768 menu window guard in RecTimerProc */
+        FILE* fpPro = fopen_dual("src/tinytask_pro.c", "reverse-gemini/src/pro/tinytask_pro.c");
+        if (!fpPro) fpPro = fopen_dual("src/pro/tinytask_pro.c", "reverse-gemini/src/pro/tinytask_pro.c");
+        assert(fpPro != NULL);
+        fseek(fpPro, 0, SEEK_END);
+        long proSz = ftell(fpPro);
+        fseek(fpPro, 0, SEEK_SET);
+        char* proSrc = (char*)malloc(proSz + 1);
+        fread(proSrc, 1, proSz, fpPro);
+        proSrc[proSz] = '\0';
+        fclose(fpPro);
+
+        const char* pRecTimer = strstr(proSrc, "RecTimerProc");
+        assert(pRecTimer != NULL);
+        const char* pMenuGuard = strstr(pRecTimer, "#32768");
+        printf("Test 15B (Menu #32768 guard in RecTimerProc): pMenuGuard=%p (must NOT be NULL)\n", pMenuGuard);
+        fflush(stdout);
+        assert(pMenuGuard != NULL); // Fails RED on current code!
+
+        free(visSrc);
+        free(proSrc);
+    }
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");
     return 0;
 }
+

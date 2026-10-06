@@ -509,6 +509,20 @@ void ttp_engine_set_screen_dc_override(HDC hdcOverride) {
     s_hdcScreenOverride = hdcOverride;
 }
 
+static void get_screen_or_dc_dimensions(HDC hdc, int* pW, int* pH) {
+    if (s_hdcScreenOverride) {
+        HBITMAP hBmp = (HBITMAP)GetCurrentObject(hdc, OBJ_BITMAP);
+        BITMAP bm;
+        if (hBmp && GetObjectA(hBmp, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            *pW = bm.bmWidth;
+            *pH = bm.bmHeight;
+            return;
+        }
+    }
+    *pW = GetSystemMetrics(SM_CXSCREEN);
+    *pH = GetSystemMetrics(SM_CYSCREEN);
+}
+
 static inline int score_to_int(double s) {
     return (int)s;
 }
@@ -662,8 +676,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
             /* Dual-Engine Fallback: If accessible text was not found or failed visual verification, attempt visual NCC match using bmpData */
             if (!targetFound && bmpData && bmpSize > 0) {
                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
-                int screenW = GetSystemMetrics(SM_CXSCREEN);
-                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                int screenW = 0, screenH = 0;
+                get_screen_or_dc_dimensions(hdcScreen, &screenW, &screenH);
 
                 // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
@@ -722,8 +736,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         while (!targetFound) {
             if (bmpData && bmpSize > 0) {
                 HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
-                int screenW = GetSystemMetrics(SM_CXSCREEN);
-                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                int screenW = 0, screenH = 0;
+                get_screen_or_dc_dimensions(hdcScreen, &screenW, &screenH);
 
                 // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
                 POINT matchPos = { step->origX, step->origY };
@@ -781,8 +795,8 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
         targetFound = TRUE;
     }
 
-    int scrW = GetSystemMetrics(SM_CXSCREEN);
-    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    int scrW = 0, scrH = 0;
+    get_screen_or_dc_dimensions(s_hdcScreenOverride, &scrW, &scrH);
 
     /* Strict screen bounds guard: reject off-screen coordinates to prevent wrapping/clamping to (0,0) */
     if (targetX < 0 || targetY < 0 || targetX >= scrW || targetY >= scrH) {
