@@ -9,7 +9,7 @@
   - **32 位与 64 位双架构全量构建与零 CRT 维持**:
     - 修复拖拽插值中的 `65535ULL` 强制 64 位除法导致的 `__udivdi3` 符号缺失，改为 32 位整数无损除法；
     - 本地静态定义 `s_IID_IAccessible`，移除外部 GUID 依赖；
-    - `tinytask_pro.exe` (77.0 KB, 78,848 字节) 与 `tinytask_pro_x86.exe` (77.5 KB, 79,360 字节)，均严格满足 Zero-CRT 与体积门禁。
+    - `tinytask_pro.exe` (77.0 KB, 78,848 字节) 与 `tinytask_pro_x86.exe` (70.5 KB, 72,192 字节)，x86 比 x64 瘦小 6.5 KB，均严格满足 Zero-CRT 与体积门禁。
   - **全量 8 大测试套件 100% GREEN**:
     - 新增 Test 17（Test 17A 源码不变量校验 + Test 17B 纯色矢量掩码匹配与底噪抑制行为测试），全套 50+ 测试全绿通过。
 
