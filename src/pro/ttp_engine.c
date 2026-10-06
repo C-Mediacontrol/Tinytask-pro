@@ -588,6 +588,75 @@ static const char* ttp_strstr(const char* haystack, const char* needle) {
     return NULL;
 }
 
+static BOOL ttp_match_visual_target_adaptive(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, double baseMinScore, POINT* outTargetPos) {
+    if (!step || !bmpData || bmpSize == 0) return FALSE;
+
+    HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
+    int screenW = 0, screenH = 0;
+    get_screen_or_dc_dimensions(hdcScreen, &screenW, &screenH);
+
+    // Tier 1A: Localized ROI Fast Search (radius = 200px around recorded position)
+    POINT matchPos = { step->origX, step->origY };
+    double score = 0.0;
+    BOOL matched = FALSE;
+    ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.45, &matchPos, &score);
+    if (score >= baseMinScore) {
+        matched = TRUE;
+    }
+    ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+        matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
+
+    // Plan A + Plan D: If score is in marginal range (0.45 <= score < baseMinScore), trigger Speculative Pre-Hover Probe & Spatial Adaptive Gate
+    if (!matched && score >= 0.45) {
+        int dx = (int)(matchPos.x - step->origX);
+        int dy = (int)(matchPos.y - step->origY);
+        int distSq = dx * dx + dy * dy;
+
+        // Plan D Spatial Gate: If strictly in near-origin neighborhood (dist <= 20px, distSq <= 400) and score >= 0.55, directly accept
+        if (distSq <= 400 && score >= 0.55) {
+            matched = TRUE;
+            ttp_diag_log("  [VISUAL] Plan D Spatial Gate: Near-origin (%d px) score=%d.%04d accepted!",
+                (int)ttp_isqrt((unsigned long long)distSq), score_to_int(score), score_to_frac(score));
+        } else if (!s_hdcScreenOverride && distSq <= 22500) { // within 150px
+            // Plan A Hover Probe: Move cursor to candidate position to trigger Hover state in host application
+            SetCursorPos(matchPos.x, matchPos.y);
+            Sleep(35); // Allow host UI thread to paint hover highlight
+
+            // Re-capture and re-test ROI
+            ReleaseDC(NULL, hdcScreen);
+            hdcScreen = GetDC(NULL);
+
+            POINT hoverMatchPos = matchPos;
+            double hoverScore = 0.0;
+            BOOL hoverMatched = ttp_match_template_ncc_roi(hdcScreen, matchPos.x, matchPos.y, 80, bmpData, bmpSize, 0.65, &hoverMatchPos, &hoverScore);
+            ttp_diag_log("  [VISUAL] Plan A Hover Probe: hoverMatched=%d, hoverScore=%d.%04d at (%ld, %ld)",
+                hoverMatched, score_to_int(hoverScore), score_to_frac(hoverScore), hoverMatchPos.x, hoverMatchPos.y);
+
+            if (hoverMatched || hoverScore >= 0.65) {
+                matched = TRUE;
+                matchPos = hoverMatchPos;
+            } else if (distSq <= 400 && hoverScore >= 0.55) { // Plan D fallback after hover probe
+                matched = TRUE;
+                matchPos = hoverMatchPos;
+            }
+        }
+    }
+
+    // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
+    if (!matched) {
+        matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, baseMinScore, &matchPos, &score);
+        ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
+            matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
+    }
+
+    if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
+
+    if (matched && outTargetPos) {
+        *outTargetPos = matchPos;
+    }
+    return matched;
+}
+
 BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, HWND hParentForModal) {
     if (!step) return FALSE;
 
@@ -675,29 +744,10 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
             /* Dual-Engine Fallback: If accessible text was not found or failed visual verification, attempt visual NCC match using bmpData */
             if (!targetFound && bmpData && bmpSize > 0) {
-                HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
-                int screenW = 0, screenH = 0;
-                get_screen_or_dc_dimensions(hdcScreen, &screenW, &screenH);
-
-                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
-                POINT matchPos = { step->origX, step->origY };
-                double score = 0.0;
-                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.70, &matchPos, &score);
-                ttp_diag_log("  [VISUAL] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
-                    matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
-
-                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
-                if (!matched) {
-                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.70, &matchPos, &score);
-                    ttp_diag_log("  [VISUAL] Tier 2 Full: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
-                        matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
-                }
-
-                if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
-
-                if (matched) {
-                    targetX = matchPos.x;
-                    targetY = matchPos.y;
+                POINT targetPt = {0};
+                if (ttp_match_visual_target_adaptive(step, bmpData, bmpSize, 0.70, &targetPt)) {
+                    targetX = targetPt.x;
+                    targetY = targetPt.y;
                     targetFound = TRUE;
                     ttp_diag_log("  [VISUAL] Visual MATCHED! target=(%ld, %ld)", targetX, targetY);
                     break;
@@ -735,29 +785,10 @@ BOOL ttp_playback_step(const TTPStep* step, const BYTE* bmpData, DWORD bmpSize, 
 
         while (!targetFound) {
             if (bmpData && bmpSize > 0) {
-                HDC hdcScreen = s_hdcScreenOverride ? s_hdcScreenOverride : GetDC(NULL);
-                int screenW = 0, screenH = 0;
-                get_screen_or_dc_dimensions(hdcScreen, &screenW, &screenH);
-
-                // Tier 1: Localized ROI Fast Search (radius = 200px around recorded position)
-                POINT matchPos = { step->origX, step->origY };
-                double score = 0.0;
-                BOOL matched = ttp_match_template_ncc_roi(hdcScreen, step->origX, step->origY, 200, bmpData, bmpSize, 0.75, &matchPos, &score);
-                ttp_diag_log("  [IMAGE] Tier 1 ROI: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
-                    matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
-
-                // Tier 2: Fall back to full-screen pyramid search if Tier 1 misses (target moved far away)
-                if (!matched) {
-                    matched = ttp_match_template_ncc(hdcScreen, screenW, screenH, bmpData, bmpSize, 0.75, &matchPos, &score);
-                    ttp_diag_log("  [IMAGE] Tier 2 Full: matched=%d, score=%d.%04d, pos=(%ld, %ld)",
-                        matched, score_to_int(score), score_to_frac(score), matchPos.x, matchPos.y);
-                }
-
-                if (!s_hdcScreenOverride) ReleaseDC(NULL, hdcScreen);
-
-                if (matched) {
-                    targetX = matchPos.x;
-                    targetY = matchPos.y;
+                POINT targetPt = {0};
+                if (ttp_match_visual_target_adaptive(step, bmpData, bmpSize, 0.75, &targetPt)) {
+                    targetX = targetPt.x;
+                    targetY = targetPt.y;
                     targetFound = TRUE;
                     ttp_diag_log("  [IMAGE] Image MATCHED! target=(%ld, %ld)", targetX, targetY);
                     break;

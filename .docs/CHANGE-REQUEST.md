@@ -1,29 +1,37 @@
-## 类型：🐛 Bug 修复
+## 类型：✨ 功能增强 / 优化
 
 ### 摘要
-修复右键桌面图标弹出菜单时程序卡死 0.5s 并因栈保护页越界崩溃 (0xC0000005) 的问题。
+引入原位预悬停嗅探探针（Speculative Pre-Hover Probe）与原位空间自适应门限（Spatial Adaptive Gate），解决回放时因光标未悬停导致的按钮 Idle 态与录制 Hover 态视觉不一致匹配失败问题；同步完成 x86 与 x64 双架构的最新二进制构建与验证。
 
 ### 根因 / 背景
-1. **栈越界踩空崩溃 (0xC0000005)**: `ttp_vision.c` 中的 `ttp_adaptive_crop_button` 在函数栈上分配了 4 个 64KB 二维数组（`gray`, `edge`, `dilated`, `closed`，合计 256KB）。在最近引入的 Zero-CRT 极简化编译参数 `-mno-stack-arg-probe` 约束下，GCC 禁用了栈探测探针 `___chkstk_ms`。函数入口 `sub $0x40108, %rsp` / `sub $0x400ac, %esp` 一次性越过 Windows 4KB 栈保护页（Guard Page），在未提交页面写入时被内核以 `0xC0000005` 强制杀死。
-2. **跨进程模态菜单卡死 ~0.5s**: 桌面右键上下文菜单（`#32768` 窗口）弹出时，Windows Explorer 进入模态菜单跟踪循环。`RecTimerProc` 在此时调用 `AccessibleObjectFromPoint` 会在跨进程 COM RPC 查询中被 Explorer 模态泵阻塞约 0.5 秒。超时返回 `hasAcc = FALSE` 后无图片缓存，强制进入上述 `ttp_adaptive_crop_button` 导致程序致命崩溃。
+1. **光标悬停与常态视觉差异（Hover vs Idle Discrepancy）**：
+   录制时鼠标光标已位于按钮上方，UI 控件（如 Web/Qt/Fluent/自定义渲染按钮）呈现高亮/变色/发光的 Hover 状态；
+   回放时光标尚未移入，按钮处于未激活的 Idle 常态。这导致 NCC 相似度得分从录制时的 $>0.85$ 下降至 $0.50 \sim 0.65$，低于常规的 0.70/0.75 置信度门槛，从而引发误报或超时未命中。
+2. **x86 生产二进制重构**：
+   此前 x86 二进制因缺少本地 32 位编译环境未同步重编，现已在 `w64devkit-i686` 环境下完成接入，需同步将修复纳入自动化构建与发布。
 
-### 方案
+### 方案 (A+D 组合拳)
 - **原始逻辑**:
-  - `ttp_adaptive_crop_button` 在栈上声明 256KB 局部数组。
-  - `RecTimerProc` 对所有坐标无差别调用 `AccessibleObjectFromPoint`，即使在系统模态菜单 `#32768` 上也是如此；若无图片缓存则一律调用 `ttp_adaptive_crop_button`。
-- **新逻辑**:
-  - `ttp_adaptive_crop_button` 内部改为单次 `HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 256 * 256 * 4)` 从堆中申请工作缓冲块，指针细分映射给 `gray`, `edge`, `dilated`, `closed`，并在所有退出分支（以及异常保护路径）统一 `HeapFree`，彻底消除栈压力（栈帧控制在 1KB 以内）。
-  - `RecTimerProc` 增加系统模态菜单短路防护：通过 `WindowFromPoint` 配合窗口类名探测（`#32768`），遇到菜单窗口或右键操作时，跳过耗时且易阻塞的跨进程 COM MSAA 查询，直接记录标准坐标/按键事件，消除 0.5s 卡死。
+  - `ttp_playback_step` 中 Tier 1 ROI 搜寻直接以静态 0.70/0.75 为硬门槛；若未命中则直接进入 Tier 2 全屏搜寻，全程不改变光标位置。
+- **新逻辑 (方案 A + 方案 D)**:
+  - **Tier 1A 常规 ROI 搜寻**：门限 0.70，若直接命中则 0ms 额外开销快速通过。
+  - **Tier 1B 临界置信度预悬停探针 (方案 A)**：
+    若 ROI 最佳候选得分处于 $0.45 \le \text{score} < 0.70$：
+    - 在真实回放环境下（`!s_hdcScreenOverride`），将光标临时预移动至候选点（或 `origPt`），短暂等待 35ms 触发控件的 `WM_MOUSEMOVE` 悬停高亮渲染；
+    - 重新抓取屏幕并执行二次 ROI 复测。若目标被激活高亮，得分跃升至 $\ge 0.65$，立即锁定目标。
+  - **Tier 1C 原位空间宽容度自适应 (方案 D)**：
+    若复测或原位距离 $\le 20\text{px}$ 且得分 $\ge 0.55$，结合空间临近度判定为原位常态按钮命中，避免因微弱底色差异误报。
+  - **Tier 2 全屏保底搜寻**：若上述均未命中，再降级进入全屏金字塔搜寻。
 - **修改方式**:
-  - 修改 `reverse-gemini/src/pro/ttp_vision.c` 中的 `ttp_adaptive_crop_button`，实现堆化分配与释放。
-  - 修改 `reverse-gemini/src/pro/tinytask_pro.c` 中的 `RecTimerProc`，增加模态菜单短路与事件容错。
-  - 在 `reverse-gemini/tests/` 中编写专属回归测试用例，并在 x86 和 x64 两个变体上全绿回归验证。
+  - 修改 `reverse-gemini/src/pro/ttp_engine.c` 中的 `ttp_playback_step`（针对 `TTP_TARGET_TEXT` 视觉回退分支与 `TTP_TARGET_IMAGE` 分支统一应用）。
+  - 在 `reverse-gemini/tests/test_fix_repro.c` 中编写专属回归测试（Test 16），并在测试套件中验证。
+  - 分别使用 64 位与 32 位编译器重新构建 `tinytask_pro.exe` 与 `tinytask_pro_x86.exe`。
 
 ### 影响面
-- 上游（生产方）: `RecTimerProc` 录制逻辑，鼠标点击事件流
-- 下游（消费方）: `ttp_adaptive_crop_button` 自适应边界裁切，`tinytask_pro.exe` (x64), `tinytask_pro_x86.exe` (x86)
-- 风险等级: 🟢 低（将局部大数组移入堆并为模态菜单添加前置短路保护，不破坏既有录制契约与回放逻辑）
+- 生产方: `ttp_engine.c` 回放步骤执行器
+- 消费方: 宏回放流程、所有图像定位目标
+- 风险等级: 🟢 低（仅在 $0.45 \sim 0.69$ 临界区触发光标预位移，常规命中与单元测试完全不受影响）
 
 ---
-**审批**: 已批准
+**审批**: 已批准 (用户指示：我批准使用A+D)
 **状态**: 已实施已验证 (GREEN)

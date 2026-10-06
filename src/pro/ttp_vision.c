@@ -1142,7 +1142,7 @@ static BOOL match_gray_buffer_masked_ncc(
     }
 
     BOOL skipProbeSAD = ((long long)maxX * (long long)maxY <= 2500LL);
-    int maxAllowedSad = numProbes * 60;
+    int maxAllowedSad = (minScore <= 0.60) ? (numProbes * 95) : (numProbes * 60);
 
     typedef struct {
         int x;

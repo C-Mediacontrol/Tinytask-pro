@@ -962,6 +962,91 @@ int main() {
         free(proSrc);
     }
 
+    // ==========================================================
+    // Phase 5 Hover Discrepancy & Spatial Gate (Plan A + D)
+    // ==========================================================
+    {
+        printf("\n[TEST 16/16] Running Test 16: Plan A Hover Probe & Plan D Spatial Adaptive Gate...\n");
+        fflush(stdout);
+
+        /* 16A: Source code invariant in ttp_engine.c */
+        FILE* fpEng = fopen_dual("src/ttp_engine.c", "reverse-gemini/src/pro/ttp_engine.c");
+        assert(fpEng != NULL);
+        fseek(fpEng, 0, SEEK_END);
+        long engSz = ftell(fpEng);
+        fseek(fpEng, 0, SEEK_SET);
+        char* engSrc = (char*)malloc(engSz + 1);
+        fread(engSrc, 1, engSz, fpEng);
+        engSrc[engSz] = '\0';
+        fclose(fpEng);
+
+        const char* pHoverProbe = strstr(engSrc, "Plan A Hover Probe");
+        const char* pSpatialGate = strstr(engSrc, "Plan D Spatial Gate");
+        const char* pAdaptiveFunc = strstr(engSrc, "ttp_match_visual_target_adaptive");
+        printf("Test 16A (Engine Invariants): pHoverProbe=%p, pSpatialGate=%p, pAdaptiveFunc=%p\n",
+               pHoverProbe, pSpatialGate, pAdaptiveFunc);
+        fflush(stdout);
+        free(engSrc);
+        assert(pHoverProbe != NULL); // Fails RED before implementation
+        assert(pSpatialGate != NULL);
+        assert(pAdaptiveFunc != NULL);
+        printf("Test 16A passed!\n");
+        fflush(stdout);
+
+        /* 16B: Behavioral verification of Plan D Spatial Adaptive Gate */
+        int testCanvasW = 600, testCanvasH = 400;
+        int btnW = 40, btnH = 20;
+        DWORD btnBmpSize = 0;
+        BYTE* btnBmp = create_test_pattern_bmp(btnW, btnH, &btnBmpSize);
+
+        HDC hdcScr16 = GetDC(NULL);
+        HDC hdcMem16 = CreateCompatibleDC(hdcScr16);
+        HBITMAP hBmp16 = CreateCompatibleBitmap(hdcScr16, testCanvasW, testCanvasH);
+        SelectObject(hdcMem16, hBmp16);
+
+        // Fill background
+        RECT rcBg16 = { 0, 0, testCanvasW, testCanvasH };
+        HBRUSH hbrBg16 = CreateSolidBrush(RGB(235, 235, 235));
+        FillRect(hdcMem16, &rcBg16, hbrBg16);
+        DeleteObject(hbrBg16);
+
+        // Render button at (106, 104) with degraded contrast (simulating unhovered Idle state)
+        // Original pattern was 230 vs 20; Idle pattern has subdued 170 vs 90
+        int btnTargetX = 106, btnTargetY = 104;
+        for (int y = 0; y < btnH; y++) {
+            for (int x = 0; x < btnW; x++) {
+                BYTE v = ((x / 4) % 2 == (y / 4) % 2) ? 170 : 90;
+                SetPixel(hdcMem16, btnTargetX + x, btnTargetY + y, RGB(v, v, v));
+            }
+        }
+
+        ttp_engine_set_screen_dc_override(hdcMem16);
+
+        TTPStep step16;
+        memset(&step16, 0, sizeof(step16));
+        step16.stepId = 16;
+        step16.actionType = TTP_ACTION_CLICK;
+        step16.targetMode = TTP_TARGET_IMAGE;
+        step16.origX = 100 + btnW / 2; // Near target: offset by 6px horizontally, 4px vertically
+        step16.origY = 100 + btnH / 2;
+        step16.timeoutMs = 500;
+        step16.postDelayMs = 0;
+
+        BOOL play16 = ttp_playback_step(&step16, btnBmp, btnBmpSize, NULL);
+        ttp_engine_set_screen_dc_override(NULL);
+
+        printf("Test 16B (Plan D Spatial Gate Acceptance): play16=%d\n", play16);
+        fflush(stdout);
+        assert(play16 == TRUE);
+
+        DeleteObject(hBmp16);
+        DeleteDC(hdcMem16);
+        ReleaseDC(NULL, hdcScr16);
+        free(btnBmp);
+        printf("Test 16B passed!\n");
+        fflush(stdout);
+    }
+
     printf("==========================================\n");
     printf("ALL REGRESSION TESTS PASSED (GREEN)!\n");
     printf("==========================================\n");

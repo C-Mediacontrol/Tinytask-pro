@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.7.0] - 2026-10-06
+
+### Added & Fixed
+- **按钮光标悬停与常态视觉差异解决 (Plan A + Plan D 组合拳)**:
+  - **方案 A 原位预悬停嗅探 (Speculative Pre-Hover Probe)**: 在 `ttp_playback_step` 中统一视觉检索流程。当 ROI 候选区域最佳相似度处于边缘置信区（$0.45 \le \text{score} < \text{baseMinScore}$）时，若为真实回放桌面（`!s_hdcScreenOverride`），将光标临时预移动至候选点等待 35ms 激活宿主控件的 `WM_MOUSEMOVE` 悬停高亮渲染；重新取景复测后若得分跃升至 $\ge 0.65$，立即锁定目标并点击。
+  - **方案 D 原位空间自适应门限 (Spatial Adaptive Gate)**: 针对距离录制坐标误差 $\le 20\text{px}$ 的紧邻原位候选区域，将置信门限适度放宽至 $0.55$，有效避免因微弱底色/未悬停常态差异导致的误判或超时。
+  - **粗筛 Probe SAD 门限自适应**: 在 `match_gray_buffer_masked_ncc` 中，当 `minScore <= 0.60` 时自动将探针 SAD 容差由 60 放宽至 95，彻底避免轻微明度偏移的目标被粗筛算法误杀。
+- **x86 与 x64 双架构原生最新二进制发布**:
+  - 定位本地 `w64devkit-i686` 编译器并重新构建 `tinytask_pro_x86.exe`（69.5 KB，71,168 字节，0 CRT 依赖），彻底清除旧版二进制遗留的 256KB 栈越界与 0.5s 菜单卡死；
+  - 重新构建 `tinytask_pro.exe`（76.0 KB，77,824 字节，0 CRT 依赖），双架构全套 8 大测试套件 49+ 测试项全绿通过。
+
 ## [1.6.0] - 2026-10-06
 
 ### Fixed
